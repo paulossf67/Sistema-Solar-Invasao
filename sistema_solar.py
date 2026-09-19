@@ -37,7 +37,8 @@ DARK_PANEL = (10, 12, 28)
 BH_DISK = (255, 120, 40)
 BH_PHOTON = (255, 220, 150)
 
-BH_GRAVITY_RANGE = 900.0   # alcance efetivo da gravidade dos buracos negros (escala do jogo)
+PLANET_MASS_SCALE = 0.15  # massas planetárias reduzidas: órbitas estáveis (Sol domina)
+BH_GRAVITY_RANGE = 500.0   # alcance efetivo da gravidade dos buracos negros (escala do jogo)
 DT_REF = 1.0 / 60.0        # passo de referência: contadores em "frames" são escalados por dt*60
 
 
@@ -848,7 +849,7 @@ class Game:
             v = math.sqrt(G * 8000 / r) * 0.995
             vx = -v * math.sin(theta)
             vy =  v * math.cos(theta)
-            body = Body(name, x, y, vx, vy, mass, rad, color)
+            body = Body(name, x, y, vx, vy, mass * PLANET_MASS_SCALE, rad, color)
             body.compute_accel(self.bodies)  # aceleração inicial
             self.bodies.append(body)
 
