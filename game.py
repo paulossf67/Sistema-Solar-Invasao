@@ -11,11 +11,43 @@ import pygame
 from config import *
 from physics import *
 from render import *
+from render import _cached_surface
 from entities import *
 from audio import Sfx
 
+MAP_SIZE = 190
+MAP_RANGE = 4200.0
+PLANETS_DATA = [
+    ("Mercúrio", 180,  8,  6,  (180, 160, 140)),
+    ("Vênus",    260, 18,  9,  (230, 190, 100)),
+    ("Terra",    360, 22, 10,  (70, 140, 255)),
+    ("Marte",    480, 12,  7,  (220, 100, 60)),
+    ("Júpiter",  720, 90, 22,  (220, 180, 120)),
+    ("Saturno",  920, 55, 18,  (230, 210, 150)),
+    ("Urano",   1120, 30, 14,  (120, 220, 230)),
+    ("Netuno",  1320, 28, 13,  (60, 100, 255)),
+]
+PAUSE_OPTIONS = ["Continuar", "Reiniciar", "Voltar ao menu", "Sair"]
 
-# ==================== JOGO PRINCIPAL ====================
+
+def load_highscore():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), HIGHSCORE_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return int(json.load(f).get("highscore", 0))
+    except (OSError, ValueError, AttributeError):
+        return 0
+
+
+def save_highscore(value):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), HIGHSCORE_FILE)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"highscore": int(value)}, f)
+    except OSError:
+        pass
+
+
 class Game:
     def __init__(self):
         pygame.init()
@@ -24,248 +56,228 @@ class Game:
         self.clock = pygame.time.Clock()
         self.font = get_font(18)
         self.big_font = get_font(36, bold=True)
+        self.huge_font = get_font(56, bold=True)
         self.small_font = get_font(14)
+        self.sfx = Sfx()
         rng = random.Random(42)   # estrelas fixas de fundo (geradas uma única vez)
         self.stars = [(rng.randint(-3000, 3000), rng.randint(-3000, 3000), rng.randint(90, 255))
                       for _ in range(130)]
+        self.highscore = load_highscore()
+        self.show_physics_panel = True
+        self.show_prediction = True
+        self.state = "menu"          # menu | playing | paused | over
+        self.pause_sel = 0
         self.reset()
 
+    @property
+    def game_over(self):
+        return self.state == "over"
+
+    @property
+    def paused(self):
+        return self.state == "paused"
+
+    # ------------------------------------------------------------------ setup
     def reset(self):
-        self.bodies = [
-            Body("Sol", 0, 0, 0, 0, 8000, 45, YELLOW, is_sun=True)
-        ]
+        self.bodies = [Body("Sol", 0, 0, 0, 0, 8000, 45, YELLOW, is_sun=True)]
 
-        planets_data = [
-            ("Mercúrio", 180,  8,  6,  (180, 160, 140)),
-            ("Vênus",    260, 18,  9,  (230, 190, 100)),
-            ("Terra",    360, 22, 10,  (70, 140, 255)),
-            ("Marte",    480, 12,  7,  (220, 100, 60)),
-            ("Júpiter",  720, 90, 22,  (220, 180, 120)),
-            ("Saturno",  920, 55, 18,  (230, 210, 150)),
-            ("Urano",   1120, 30, 14,  (120, 220, 230)),
-            ("Netuno",  1320, 28, 13,  (60, 100, 255)),
-        ]
-
-        for name, r, mass, rad, color in planets_data:
+        for name, r, mass, rad, color in PLANETS_DATA:
             theta = random.uniform(0, 2 * math.pi)
             x = r * math.cos(theta)
             y = r * math.sin(theta)
             v = math.sqrt(G * 8000 / r) * 0.995
             vx = -v * math.sin(theta)
-            vy =  v * math.cos(theta)
+            vy = v * math.cos(theta)
             body = Body(name, x, y, vx, vy, mass * PLANET_MASS_SCALE, rad, color)
-            body.compute_accel(self.bodies)  # aceleração inicial
+            body.compute_accel(self.bodies)
             self.bodies.append(body)
 
-        # === Buracos negros supermassivos / Quasar ===
-        # Sagitarius A* — relativamente quieto
-        bh1 = BlackHole("Sagitarius A*", 2800, -900, mass=45000, horizon_radius=32,
-                        active_quasar=False)
-        # M87* — quasar ativo com jatos relativísticos (inspirado no jato real de M87)
-        bh2 = BlackHole("M87* (Quasar)", -3400, 1800, mass=95000, horizon_radius=52,
-                        active_quasar=True, jet_angle=35.0)
-        self.bodies.append(bh1)
-        self.bodies.append(bh2)
+        # Sagitarius A* — relativamente quieto; M87* — quasar ativo com jatos relativísticos
+        self.bodies.append(BlackHole("Sagitarius A*", 2800, -900, mass=45000, horizon_radius=32,
+                                     active_quasar=False))
+        self.bodies.append(BlackHole("M87* (Quasar)", -3400, 1800, mass=95000, horizon_radius=52,
+                                     active_quasar=True, jet_angle=35.0))
 
-        # Recomputa acelerações com todos os corpos (incluindo BHs)
         for body in self.bodies:
-            if hasattr(body, "compute_accel"):
-                body.compute_accel(self.bodies)
+            body.compute_accel(self.bodies)
 
-        # Jogador perto da Terra
         terra = next(b for b in self.bodies if b.name == "Terra")
         self.player = Player(terra.x + 55, terra.y)
         self.player.vx = terra.vx
         self.player.vy = terra.vy - 1.2
         self.player.compute_accel(self.bodies)
 
+        self.belt = AsteroidBelt(8000)
+        self.belt.init_accel(source_arrays(self.bodies))
+
         self.bullets = []
         self.aliens = []
+        self.particles = []
+        self.powerups = []
         self.wave = 1
         self.wave_timer = 180.0
         self.shoot_cd = 0.0
-        self.game_over = False
-        self.paused = False
         self.cam_x = 0.0
         self.cam_y = 0.0
         self.zoom = 0.55
+        self.warning = ""
+        self.refueling = False
+        self.frame = 0
+        self.pred_path, self.pred_hit = [], None
+        self.substeps = 1
 
-        # Histórico para gráficos de conservação
         self.energy_history = deque(maxlen=300)   # ~5 segundos a 60 fps
         self.L_history = deque(maxlen=300)
         self.initial_energy = None
         self.initial_L = None
         self.n_solar_bodies = None   # muda quando um planeta é engolido → rebaseia E e L
-        self.show_physics_panel = True
 
         self.spawn_wave()
 
     def spawn_wave(self):
-        n = 3 + self.wave * 2
+        kinds = alien_kinds_for_wave(self.wave)
+        weights = {"normal": 4, "fast": 2, "shooter": 2, "tank": 1}
+        n = min(3 + self.wave * 2, 20)
         for _ in range(n):
             angle = random.uniform(0, 2 * math.pi)
             dist = random.uniform(1600, 2200)
-            x = dist * math.cos(angle)
-            y = dist * math.sin(angle)
-            alien = Alien(x, y, self.player)
+            kind = random.choices(kinds, weights=[weights[k] for k in kinds])[0]
+            alien = Alien(dist * math.cos(angle), dist * math.sin(angle), self.player, kind)
             alien.compute_accel(self.bodies, self.player)
             self.aliens.append(alien)
 
+    # ------------------------------------------------------------------ eventos do jogo
+    def end_game(self):
+        if self.state == "over":
+            return
+        self.state = "over"
+        self.player.lives = max(0, self.player.lives)
+        spawn_explosion(self.particles, self.player.x, self.player.y, CYAN, n=40, speed=220, size=4)
+        self.sfx.play("explode")
+        if self.player.score > self.highscore:
+            self.highscore = self.player.score
+            save_highscore(self.highscore)
+
+    def hurt_player(self, invincible_frames=90):
+        p = self.player
+        if p.protected or self.state != "playing":
+            return False
+        p.lives -= 1
+        p.invincible = invincible_frames
+        self.sfx.play("hit")
+        spawn_explosion(self.particles, p.x, p.y, RED, n=14, speed=120, vx=p.vx * 0.3, vy=p.vy * 0.3)
+        if p.lives <= 0:
+            self.end_game()
+        return True
+
+    def kill_alien(self, alien, points, drop=True):
+        if alien in self.aliens:
+            self.aliens.remove(alien)
+        self.player.score += int(points * alien.spec["score"])
+        spawn_explosion(self.particles, alien.x, alien.y, alien.spec["color"],
+                        n=22 if alien.kind == "tank" else 14, vx=alien.vx * 0.3, vy=alien.vy * 0.3)
+        self.sfx.play("explode")
+        if drop and random.random() < POWERUP_DROP_CHANCE:
+            kinds = ["shield", "triple", "fuel"] * 2 + (["life"] if self.player.lives < 5 else [])
+            self.powerups.append(PowerUp(alien.x, alien.y, random.choice(kinds), alien.vx, alien.vy))
+
+    def apply_powerup(self, kind):
+        p = self.player
+        if kind == "shield":
+            p.shield = SHIELD_TIME
+        elif kind == "triple":
+            p.triple = TRIPLE_TIME
+        elif kind == "fuel":
+            p.fuel = min(FUEL_MAX, p.fuel + FUEL_MAX * 0.5)
+        elif kind == "life":
+            p.lives = min(5, p.lives + 1)
+        self.sfx.play("pickup")
+
+    # ------------------------------------------------------------------ entrada
     def handle_input(self, dt):
         keys = pygame.key.get_pressed()
+        p = self.player
         if keys[pygame.K_LEFT] or keys[pygame.K_a]:
-            self.player.rotate(-1, dt)
+            p.rotate(-1, dt)
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
-            self.player.rotate(1, dt)
+            p.rotate(1, dt)
         if keys[pygame.K_UP] or keys[pygame.K_w]:
-            self.player.apply_thrust(dt)
+            p.apply_thrust(dt)
+            if p.thrusting:
+                self.sfx.thrust()
 
-        if keys[pygame.K_SPACE]:
-            if self.shoot_cd <= 0:
-                self.bullets.append(Bullet(self.player.x, self.player.y, self.player.angle))
-                self.shoot_cd = 12.0
+        if keys[pygame.K_SPACE] and self.shoot_cd <= 0:
+            angles = (-9, 0, 9) if p.triple > 0 else (0,)
+            for da in angles:
+                self.bullets.append(Bullet(p.x, p.y, p.angle + da, vx0=p.vx, vy0=p.vy))
+            self.shoot_cd = 12.0
+            self.sfx.play("shoot")
         if self.shoot_cd > 0:
             self.shoot_cd -= dt * 60
 
-        if keys[pygame.K_EQUALS] or keys[pygame.K_PLUS]:
+        if keys[pygame.K_EQUALS] or keys[pygame.K_PLUS] or keys[pygame.K_KP_PLUS]:
             self.zoom = min(1.8, self.zoom + 0.012 * dt * 60)
-        if keys[pygame.K_MINUS]:
+        if keys[pygame.K_MINUS] or keys[pygame.K_KP_MINUS]:
             self.zoom = max(0.12, self.zoom - 0.012 * dt * 60)
 
-    def update(self, dt):
-        if self.game_over or self.paused:
-            return
-
-        # === Velocity Verlet em duas fases para todos os corpos ===
-        # 1) todos avançam a posição com a aceleração antiga;
-        # 2) as acelerações são recalculadas com o estado novo e as velocidades atualizadas.
-        movers = self.bodies + [self.player] + self.aliens
-        for m in movers:
-            m.drift(dt)
-        for body in self.bodies:
-            body.kick(dt, self.bodies)
-        self.player.kick(dt, self.bodies)
-
-        # Câmera suave (independente do FPS)
-        k = 1.0 - (1.0 - 0.09) ** (dt * 60)
-        self.cam_x += (self.player.x - self.cam_x) * k
-        self.cam_y += (self.player.y - self.cam_y) * k
-
-        # --- Horizonte de eventos + jatos de quasar ---
-        black_holes = [b for b in self.bodies if getattr(b, "is_black_hole", False)]
-        for bh in black_holes:
-            # Jogador engolido
-            if bh.swallows(self.player.x, self.player.y, self.player.radius):
-                self.player.lives = 0
-                self.game_over = True
-                bh.swallowed += 1
-
-            # Jato do quasar afeta o jogador
-            if bh.active_quasar and self.player.invincible <= 0:
-                intensity = bh.apply_jet_force(self.player, dt)
-                if intensity > 0.15:
-                    # Dano por radiação / partículas relativísticas
-                    self.player.lives -= 1
-                    self.player.invincible = 75
-                    if self.player.lives <= 0:
-                        self.game_over = True
-
-            # Aliens
-            for alien in self.aliens[:]:
-                if bh.swallows(alien.x, alien.y, alien.radius):
-                    self.aliens.remove(alien)
-                    bh.swallowed += 1
-                    self.player.score += 50
-                    continue
-                # Jato também empurra / danifica aliens
-                if bh.active_quasar:
-                    intensity = bh.apply_jet_force(alien, dt)
-                    if intensity > 0.25:
-                        alien.hp -= 1
-                        if alien.hp <= 0:
-                            self.aliens.remove(alien)
-                            self.player.score += 80  # bônus por destruir com o jato
-
-            # Tiros engolidos
-            for b in self.bullets[:]:
-                if bh.swallows(b.x, b.y, b.radius):
-                    self.bullets.remove(b)
-
-            # Planetas engolidos
-            for body in self.bodies[:]:
-                if getattr(body, "is_black_hole", False) or body.is_sun:
-                    continue
-                if bh.swallows(body.x, body.y, body.radius):
-                    self.bodies.remove(body)
-                    bh.swallowed += 1
-
-        # Aliens
-        for alien in self.aliens[:]:
-            alien.kick(dt, self.bodies, self.player, self.bullets)
-
-            # Colisão alien × jogador
-            if self.player.invincible <= 0:
-                dx = alien.x - self.player.x
-                dy = alien.y - self.player.y
-                if dx*dx + dy*dy < (alien.radius + self.player.radius)**2:
-                    self.player.lives -= 1
-                    self.player.invincible = 90
-                    alien.vx += dx * 0.08
-                    alien.vy += dy * 0.08
-                    if self.player.lives <= 0:
-                        self.game_over = True
-
-        # Tiros
-        for b in self.bullets[:]:
-            b.update(dt)
-            if b.life <= 0:
-                self.bullets.remove(b)
+    # ------------------------------------------------------------------ física
+    def _substeps(self, dt):
+        """Subpassos adaptativos: mais passos quando algo rápido passa perto de um corpo."""
+        n = 1
+        for m in [self.player] + self.aliens:
+            step = math.hypot(m.vx, m.vy) * dt
+            if step < 1.0:
                 continue
+            dmin = min(math.hypot(b.x - m.x, b.y - m.y) - b.radius for b in self.bodies)
+            n = max(n, math.ceil(step / (0.3 * max(dmin, 10.0))))
+        return min(n, MAX_SUBSTEPS)
 
-            if b.owner == "player":
-                for alien in self.aliens[:]:
-                    dx = alien.x - b.x
-                    dy = alien.y - b.y
-                    if dx*dx + dy*dy < (alien.radius + b.radius)**2:
-                        alien.hp -= 1
-                        if b in self.bullets:
-                            self.bullets.remove(b)
-                        if alien.hp <= 0:
-                            self.aliens.remove(alien)
-                            self.player.score += 100 * self.wave
-                        break
-            else:
-                if self.player.invincible <= 0:
-                    dx = self.player.x - b.x
-                    dy = self.player.y - b.y
-                    if dx*dx + dy*dy < (self.player.radius + b.radius)**2:
-                        self.player.lives -= 1
-                        self.player.invincible = 90
-                        if b in self.bullets:
-                            self.bullets.remove(b)
-                        if self.player.lives <= 0:
-                            self.game_over = True
-
-        # Colisão com planetas / Sol
+    def _integrate(self, dt):
+        """Velocity Verlet em duas fases, com subpassos adaptativos."""
+        n = self._substeps(dt)
+        self.substeps = n
+        h = dt / n
+        for _ in range(n):
+            for m in self.bodies + [self.player] + self.aliens:
+                m.drift(h)
+            self.belt.drift(h)
+            for body in self.bodies:
+                body.kick(h, self.bodies)
+            self.player.kick(h, self.bodies)
+            for alien in self.aliens:
+                alien.kick(h, self.bodies, self.player)
+            self.belt.kick(h, source_arrays(self.bodies))
         for body in self.bodies:
-            dx = body.x - self.player.x
-            dy = body.y - self.player.y
-            min_dist = body.radius + self.player.radius
-            if dx*dx + dy*dy < min_dist*min_dist:
-                if body.is_sun:
-                    self.player.lives = 0
-                    self.game_over = True
-                else:
-                    if self.player.invincible <= 0:
-                        self.player.lives -= 1
-                        self.player.invincible = 60
-                        dist = math.sqrt(dx*dx + dy*dy) + 0.1
-                        self.player.vx -= (dx / dist) * 5
-                        self.player.vy -= (dy / dist) * 5
-                        if self.player.lives <= 0:
-                            self.game_over = True
+            body.record_trail()
 
-        # Próxima onda
+    def update(self, dt):
+        if self.state != "playing":
+            return
+        self.frame += 1
+        p = self.player
+        self._integrate(dt)
+
+        k = 1.0 - (1.0 - 0.09) ** (dt * 60)   # câmera suave independente do FPS
+        self.cam_x += (p.x - self.cam_x) * k
+        self.cam_y += (p.y - self.cam_y) * k
+
+        for part in self.particles[:]:
+            part.update(dt)
+            if part.life <= 0:
+                self.particles.remove(part)
+        for pu in self.powerups[:]:
+            pu.update(dt)
+            if pu.life <= 0:
+                self.powerups.remove(pu)
+
+        self._black_holes(dt)
+        self._aliens(dt)
+        self._bullets(dt)
+        self._planet_collisions()
+        self._belt_collisions()
+        self._powerups()
+        self._refuel_and_warnings(dt)
+
         if not self.aliens:
             self.wave_timer -= dt * 60
             if self.wave_timer <= 0:
@@ -273,10 +285,199 @@ class Game:
                 self.spawn_wave()
                 self.wave_timer = 120.0
 
-        # === Monitoramento de conservação ===
+        self._monitor_conservation()
+
+        if self.show_prediction and self.frame % PREDICT_EVERY == 1:
+            self.pred_path, self.pred_hit = predict_trajectory(p, self.bodies)
+
+        p.end_frame(dt)
+
+    def _black_holes(self, dt):
+        p = self.player
+        black_holes = [b for b in self.bodies if getattr(b, "is_black_hole", False)]
+        for bh in black_holes:
+            if bh.swallows(p.x, p.y, p.radius):
+                p.lives = 0
+                bh.swallowed += 1
+                self.sfx.play("swallow")
+                self.end_game()
+                return
+
+            if bh.active_quasar:
+                intensity = bh.apply_jet_force(p, dt)
+                if intensity > 0.15:
+                    self.hurt_player(75)
+
+            for alien in self.aliens[:]:
+                if bh.swallows(alien.x, alien.y, alien.radius):
+                    self.kill_alien(alien, 50, drop=False)
+                    bh.swallowed += 1
+                    continue
+                if bh.active_quasar:
+                    intensity = bh.apply_jet_force(alien, dt)
+                    if intensity > 0.25:
+                        alien.hp -= 1
+                        if alien.hp <= 0:
+                            self.kill_alien(alien, 80, drop=False)
+
+            for b in self.bullets[:]:
+                if bh.swallows(b.x, b.y, b.radius):
+                    self.bullets.remove(b)
+
+            for body in self.bodies[:]:
+                if getattr(body, "is_black_hole", False) or body.is_sun:
+                    continue
+                if bh.swallows(body.x, body.y, body.radius):
+                    self.bodies.remove(body)
+                    bh.swallowed += 1
+                    spawn_explosion(self.particles, body.x, body.y, body.color, n=24, speed=100, size=4)
+                    self.sfx.play("swallow")
+
+    def _aliens(self, dt):
+        p = self.player
+        for alien in self.aliens[:]:
+            if alien.think(dt, p, self.bullets):
+                self.sfx.play("alien")
+
+            # Colisão alien × jogador (elástica; escudo abalroa o alien)
+            impact = collide_elastic(p, alien, p.mass, alien.mass, alien.radius + p.radius, 0.8)
+            if impact > 0:
+                if p.shield > 0:
+                    alien.hp -= 2
+                    if alien.hp <= 0:
+                        self.kill_alien(alien, 60)
+                        continue
+                else:
+                    self.hurt_player(90)
+
+            # Colisão alien × planetas / Sol
+            for body in self.bodies:
+                if getattr(body, "is_black_hole", False):
+                    continue
+                if body.is_sun:
+                    dx, dy = alien.x - body.x, alien.y - body.y
+                    if dx * dx + dy * dy < (body.radius + alien.radius) ** 2:
+                        self.kill_alien(alien, 30, drop=False)
+                        break
+                else:
+                    collide_elastic(alien, body, alien.mass, body.mass, alien.radius + body.radius, 0.5)
+
+    def _bullets(self, dt):
+        p = self.player
+        for b in self.bullets[:]:
+            b.update(dt, self.bodies)
+            if b.life <= 0:
+                self.bullets.remove(b)
+                continue
+
+            hit_body = None
+            for body in self.bodies:
+                if getattr(body, "is_black_hole", False):
+                    continue
+                dx, dy = body.x - b.x, body.y - b.y
+                if dx * dx + dy * dy < (body.radius + b.radius) ** 2:
+                    hit_body = body
+                    break
+            if hit_body is not None:
+                spawn_explosion(self.particles, b.x, b.y, ORANGE, n=5, speed=60, size=2)
+                self.bullets.remove(b)
+                continue
+
+            if b.owner == "player":
+                if len(self.belt):
+                    hits = np.nonzero(self.belt.hit_mask(b.x, b.y, b.radius))[0]
+                    if len(hits):
+                        i = int(hits[0])
+                        spawn_explosion(self.particles, float(self.belt.x[i]), float(self.belt.y[i]),
+                                        (170, 150, 130), n=8, speed=70, size=2)
+                        dead = np.zeros(len(self.belt), dtype=bool)
+                        dead[i] = True
+                        self.belt.remove(dead)
+                        p.score += 10
+                        self.bullets.remove(b)
+                        continue
+                for alien in self.aliens[:]:
+                    dx, dy = alien.x - b.x, alien.y - b.y
+                    if dx * dx + dy * dy < (alien.radius + b.radius) ** 2:
+                        alien.hp -= 1
+                        self.bullets.remove(b)
+                        if alien.hp <= 0:
+                            self.kill_alien(alien, 100 * self.wave)
+                        break
+            else:
+                dx, dy = p.x - b.x, p.y - b.y
+                if dx * dx + dy * dy < (p.radius + b.radius) ** 2:
+                    self.bullets.remove(b)
+                    self.hurt_player(90)
+
+    def _planet_collisions(self):
+        p = self.player
+        for body in self.bodies:
+            if getattr(body, "is_black_hole", False):
+                continue
+            if body.is_sun:
+                dx, dy = body.x - p.x, body.y - p.y
+                if dx * dx + dy * dy < (body.radius + p.radius) ** 2:
+                    p.lives = 0
+                    self.end_game()
+                    return
+                continue
+            impact = collide_elastic(p, body, p.mass, body.mass, body.radius + p.radius, 0.5)
+            if impact > 70:
+                self.hurt_player(60)
+
+    def _belt_collisions(self):
+        if not len(self.belt):
+            return
+        dead = self.belt.swallowed_mask(self.bodies)
+        p = self.player
+        hit = self.belt.hit_mask(p.x, p.y, p.radius)
+        if hit.any():
+            for i in np.nonzero(hit)[0]:
+                spawn_explosion(self.particles, float(self.belt.x[i]), float(self.belt.y[i]),
+                                (170, 150, 130), n=6, speed=80, size=2)
+            self.hurt_player(60)
+            dead |= hit
+        if dead.any():
+            self.belt.remove(dead)
+
+    def _powerups(self):
+        p = self.player
+        for pu in self.powerups[:]:
+            dx, dy = pu.x - p.x, pu.y - p.y
+            if dx * dx + dy * dy < (pu.radius + p.radius + 8) ** 2:
+                self.apply_powerup(pu.kind)
+                self.powerups.remove(pu)
+
+    def _refuel_and_warnings(self, dt):
+        p = self.player
+        self.refueling = False
+        for body in self.bodies:
+            if getattr(body, "is_black_hole", False) or body.is_sun:
+                continue
+            if math.hypot(body.x - p.x, body.y - p.y) - body.radius < FUEL_REFILL_MARGIN and p.fuel < FUEL_MAX:
+                p.fuel = min(FUEL_MAX, p.fuel + FUEL_REFILL * dt)
+                self.refueling = True
+                break
+
+        self.warning = ""
+        for body in self.bodies:
+            d = math.hypot(body.x - p.x, body.y - p.y)
+            if getattr(body, "is_black_hole", False):
+                if d < body.horizon * 3.5 + 120:
+                    self.warning = "HORIZONTE DE EVENTOS!"
+                elif body.active_quasar:
+                    inside, _ = body.in_jet_cone(p.x, p.y)
+                    if inside:
+                        self.warning = "JATO RELATIVÍSTICO!"
+            elif body.is_sun and d < 140 and not self.warning:
+                self.warning = "PERIGO: SOL!"
+        if p.fuel <= 0 and not self.warning:
+            self.warning = "SEM COMBUSTÍVEL — vá até um planeta"
+
+    def _monitor_conservation(self):
         E, K, U = compute_system_energy(self.bodies, self.player)
         L = compute_angular_momentum(self.bodies, self.player)
-
         n_solar = sum(1 for b in self.bodies if not getattr(b, "is_black_hole", False))
         if self.initial_energy is None or n_solar != self.n_solar_bodies:
             # Novo baseline (início ou planeta engolido — o sistema mudou de fato)
@@ -285,7 +486,6 @@ class Game:
             self.initial_L = L
             self.energy_history.clear()
             self.L_history.clear()
-
         self.energy_history.append(E)
         self.L_history.append(L)
 
@@ -362,87 +562,313 @@ class Game:
         label = self.small_font.render("E(t) cinza=E₀ (empuxo/jato mudam E)", True, GRAY)
         self.screen.blit(label, (graph_x, graph_y + graph_h + 4))
 
+    # ------------------------------------------------------------------ desenho
+    def _screen_pos(self, x, y):
+        return ((x - self.cam_x) * self.zoom + WIDTH // 2, (y - self.cam_y) * self.zoom + HEIGHT // 2)
+
+    def draw_stars(self):
+        # Lente gravitacional aproximada: estrelas perto de um buraco negro são empurradas para fora
+        lenses = []
+        for b in self.bodies:
+            if getattr(b, "is_black_hole", False):
+                bx, by = self._screen_pos(b.x, b.y)
+                h = max(4.0, b.horizon * self.zoom)
+                if -h * 8 < bx < WIDTH + h * 8 and -h * 8 < by < HEIGHT + h * 8:
+                    lenses.append((bx, by, h))
+        for x, y, b in self.stars:
+            sx = (x - self.cam_x * 0.08) % WIDTH
+            sy = (y - self.cam_y * 0.08) % HEIGHT
+            for bx, by, h in lenses:
+                dx, dy = sx - bx, sy - by
+                d = math.hypot(dx, dy)
+                if d < h * 7:
+                    if d < h * 1.05:
+                        sx = -100
+                        break
+                    push = min(h * 3.0, (h * 1.6) ** 2 / d)
+                    sx, sy = bx + dx / d * (d + push), by + dy / d * (d + push)
+            pygame.draw.circle(self.screen, (b, b, b), (int(sx), int(sy)), 1)
+
+    def draw_prediction(self):
+        if not self.show_prediction or len(self.pred_path) < 2:
+            return
+        n = len(self.pred_path)
+        for i in range(2, n, 2):
+            x, y = self.pred_path[i]
+            sx, sy = self._screen_pos(x, y)
+            if -10 < sx < WIDTH + 10 and -10 < sy < HEIGHT + 10:
+                f = 1.0 - i / n
+                col = (int(60 + 120 * f), int(160 + 80 * f), int(120 + 100 * f))
+                pygame.draw.circle(self.screen, col, (int(sx), int(sy)), 2)
+        if self.pred_hit is not None:
+            x, y = self.pred_path[-1]
+            sx, sy = self._screen_pos(x, y)
+            pygame.draw.line(self.screen, RED, (sx - 6, sy - 6), (sx + 6, sy + 6), 2)
+            pygame.draw.line(self.screen, RED, (sx - 6, sy + 6), (sx + 6, sy - 6), 2)
+
+    def draw_offscreen_arrows(self):
+        cx, cy = WIDTH / 2, HEIGHT / 2
+        targets = [(a.x, a.y, a.spec["color"], 2600) for a in self.aliens]
+        targets += [(pu.x, pu.y, POWERUP_KINDS[pu.kind][0], 1600) for pu in self.powerups]
+        for x, y, color, max_d in targets:
+            if math.hypot(x - self.player.x, y - self.player.y) > max_d:
+                continue
+            sx, sy = self._screen_pos(x, y)
+            if 20 < sx < WIDTH - 20 and 90 < sy < HEIGHT - 20:
+                continue
+            dx, dy = sx - cx, sy - cy
+            t = min((cx - 30) / max(abs(dx), 1e-6), (cy - 100) / max(abs(dy), 1e-6))
+            ax, ay = cx + dx * t, cy + dy * t
+            ang = math.atan2(dy, dx)
+            pts = [(ax + math.cos(ang) * 11, ay + math.sin(ang) * 11),
+                   (ax + math.cos(ang + 2.5) * 8, ay + math.sin(ang + 2.5) * 8),
+                   (ax + math.cos(ang - 2.5) * 8, ay + math.sin(ang - 2.5) * 8)]
+            pygame.draw.polygon(self.screen, color, pts)
+
+    def draw_minimap(self):
+        s = MAP_SIZE
+        x0, y0 = 12, HEIGHT - s - 12
+        scale = (s / 2) / MAP_RANGE
+        cx, cy = x0 + s // 2, y0 + s // 2
+
+        panel = _cached_surface(("minimap", s), lambda: self._minimap_bg(s))
+        self.screen.blit(panel, (x0, y0))
+
+        def to_map(wx, wy):
+            return int(cx + wx * scale), int(cy + wy * scale)
+
+        pygame.draw.circle(self.screen, (40, 50, 80), (cx, cy), int(1400 * scale), 1)
+        for i in range(0, len(self.belt), 4):
+            pygame.draw.circle(self.screen, (110, 100, 90), to_map(float(self.belt.x[i]), float(self.belt.y[i])), 0)
+        for b in self.bodies:
+            mx, my = to_map(b.x, b.y)
+            if getattr(b, "is_black_hole", False):
+                col = (255, 100, 255) if b.active_quasar else (255, 170, 80)
+                pygame.draw.circle(self.screen, col, (mx, my), 4, 1)
+                if b.active_quasar:
+                    for sign in (0, 180):
+                        a = math.radians(b.jet_angle + sign)
+                        pygame.draw.line(self.screen, (150, 90, 230), (mx, my),
+                                         to_map(b.x + math.cos(a) * b.jet_length, b.y + math.sin(a) * b.jet_length), 1)
+            elif b.is_sun:
+                pygame.draw.circle(self.screen, YELLOW, (mx, my), 3)
+            else:
+                pygame.draw.circle(self.screen, b.color, (mx, my), 2)
+        for a in self.aliens:
+            pygame.draw.circle(self.screen, a.spec["color"], to_map(a.x, a.y), 2)
+        for pu in self.powerups:
+            pygame.draw.circle(self.screen, WHITE, to_map(pu.x, pu.y), 2)
+        # área visível + nave
+        vw, vh = WIDTH / self.zoom * scale, HEIGHT / self.zoom * scale
+        vx, vy = to_map(self.cam_x - WIDTH / self.zoom / 2, self.cam_y - HEIGHT / self.zoom / 2)
+        pygame.draw.rect(self.screen, (70, 90, 130), (vx, vy, vw, vh), 1)
+        pygame.draw.circle(self.screen, CYAN, to_map(self.player.x, self.player.y), 3)
+
+    @staticmethod
+    def _minimap_bg(s):
+        surf = pygame.Surface((s, s), pygame.SRCALPHA)
+        surf.fill((8, 10, 25, 190))
+        pygame.draw.rect(surf, (60, 80, 140), (0, 0, s, s), 1)
+        return surf
+
+    def draw_bar(self, x, y, w, h, frac, color, label):
+        pygame.draw.rect(self.screen, (25, 28, 50), (x, y, w, h))
+        pygame.draw.rect(self.screen, color, (x, y, int(w * max(0.0, min(1.0, frac))), h))
+        pygame.draw.rect(self.screen, (80, 90, 130), (x, y, w, h), 1)
+        self.screen.blit(self.small_font.render(label, True, WHITE), (x + w + 8, y - 2))
+
     def draw_hud(self):
+        p = self.player
         hud = pygame.Surface((WIDTH, 72), pygame.SRCALPHA)
         hud.fill((0, 0, 20, 170))
         self.screen.blit(hud, (0, 0))
 
-        self.screen.blit(self.font.render(f"Vidas: {self.player.lives}", True, GREEN), (20, 12))
-        self.screen.blit(self.font.render(f"Pontos: {self.player.score}", True, CYAN), (20, 40))
-        self.screen.blit(self.font.render(f"Onda: {self.wave}", True, ORANGE), (200, 12))
+        self.screen.blit(self.font.render(f"Vidas: {p.lives}", True, GREEN), (20, 10))
+        self.screen.blit(self.font.render(f"Pontos: {p.score}", True, CYAN), (20, 40))
+        self.screen.blit(self.font.render(f"Onda: {self.wave}", True, ORANGE), (170, 10))
+        speed = math.hypot(p.vx, p.vy)
+        self.screen.blit(self.font.render(f"Vel: {speed:.0f}", True, WHITE), (170, 40))
+        self.screen.blit(self.small_font.render(f"Recorde: {self.highscore}", True, YELLOW), (300, 12))
 
-        speed = math.sqrt(self.player.vx**2 + self.player.vy**2)
-        self.screen.blit(self.font.render(f"Vel: {speed:.1f}", True, WHITE), (200, 40))
+        fuel_col = GREEN if p.fuel > 30 else (ORANGE if p.fuel > 12 else RED)
+        self.draw_bar(300, 40, 140, 12, p.fuel / FUEL_MAX, fuel_col,
+                      "COMB." + (" +" if self.refueling else ""))
+        if p.shield > 0:
+            self.draw_bar(520, 12, 90, 8, p.shield / SHIELD_TIME, CYAN, "escudo")
+        if p.triple > 0:
+            self.draw_bar(520, 30, 90, 8, p.triple / TRIPLE_TIME, YELLOW, "tiro x3")
 
         help1 = self.small_font.render(
-            "A/D girar | W empuxo | Espaço atirar | +/- zoom | P pausar | F painel física | R reiniciar",
+            "A/D girar | W empuxo | Espaço atirar | +/- zoom | T trajetória | M som | F painel | P pausa | R reiniciar",
             True, GRAY)
-        self.screen.blit(help1, (360, 16))
-
-        phys = self.small_font.render(
-            "Velocity Verlet  •  Newton  •  Quasar ativo (M87*) + jatos relativísticos",
+        self.screen.blit(help1, (640, 12))
+        info = self.small_font.render(
+            f"Verlet ×{self.substeps}  •  Newton  •  Quasar M87*  •  Asteroides: {len(self.belt)}",
             True, (90, 210, 120))
-        self.screen.blit(phys, (360, 42))
+        self.screen.blit(info, (640, 42))
 
-        if self.paused:
-            txt = self.big_font.render("PAUSADO", True, YELLOW)
-            self.screen.blit(txt, (WIDTH//2 - 90, HEIGHT//2 - 20))
+        if self.warning and (self.frame // 8) % 2 == 0:
+            txt = self.big_font.render(self.warning, True, RED)
+            self.screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 84))
 
-        if self.game_over:
-            overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-            overlay.fill((0, 0, 0, 190))
-            self.screen.blit(overlay, (0, 0))
-            self.screen.blit(self.big_font.render("GAME OVER", True, RED), (WIDTH//2 - 110, HEIGHT//2 - 60))
-            self.screen.blit(self.font.render(f"Pontuação final: {self.player.score}", True, WHITE),
-                             (WIDTH//2 - 110, HEIGHT//2))
-            self.screen.blit(self.font.render("Pressione R para reiniciar", True, CYAN),
-                             (WIDTH//2 - 130, HEIGHT//2 + 40))
+    def draw_overlay_text(self, lines, top):
+        for text, font, color in lines:
+            surf = font.render(text, True, color)
+            self.screen.blit(surf, (WIDTH // 2 - surf.get_width() // 2, top))
+            top += surf.get_height() + 10
+
+    def draw_menu(self):
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 10, 175))
+        self.screen.blit(overlay, (0, 0))
+        self.draw_overlay_text([
+            ("SISTEMA SOLAR", self.huge_font, YELLOW),
+            ("Invasão Alienígena", self.big_font, ORANGE),
+        ], 90)
+        self.draw_overlay_text([
+            ("A/D girar  |  W empuxo  |  Espaço atirar  |  +/- zoom", self.font, WHITE),
+            ("T trajetória prevista  |  M som  |  F painel de física  |  P/Esc pausa", self.font, WHITE),
+            ("Tiros curvam com a gravidade — use planetas como estilingue.", self.font, CYAN),
+            ("Reabasteça perto de planetas. Evite o Sol, os buracos negros e o jato do quasar.", self.font, CYAN),
+            ("Power-ups:  E escudo   3 tiro triplo   F combustível   + vida", self.font, GREEN),
+        ], 240)
+        self.draw_overlay_text([
+            (f"Recorde: {self.highscore}", self.font, YELLOW),
+            ("ENTER para começar   •   Esc para sair", self.big_font, WHITE),
+        ], 480)
+
+    def draw_pause(self):
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 10, 170))
+        self.screen.blit(overlay, (0, 0))
+        self.draw_overlay_text([("PAUSADO", self.huge_font, YELLOW)], 170)
+        top = 290
+        for i, opt in enumerate(PAUSE_OPTIONS):
+            selected = i == self.pause_sel
+            surf = self.big_font.render(("> " if selected else "  ") + opt, True, CYAN if selected else GRAY)
+            self.screen.blit(surf, (WIDTH // 2 - 150, top))
+            top += 50
+        self.draw_overlay_text([("↑/↓ escolher  •  Enter confirmar", self.small_font, GRAY)], top + 10)
+
+    def draw_game_over(self):
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 190))
+        self.screen.blit(overlay, (0, 0))
+        new_record = self.player.score >= self.highscore and self.player.score > 0
+        self.draw_overlay_text([
+            ("GAME OVER", self.huge_font, RED),
+            (f"Pontuação final: {self.player.score}   (onda {self.wave})", self.font, WHITE),
+            ("NOVO RECORDE!" if new_record else f"Recorde: {self.highscore}", self.font, YELLOW),
+            ("R / Enter reiniciar   •   Esc menu", self.font, CYAN),
+        ], 250)
 
     def draw(self):
         self.screen.fill(BLACK)
-
-        # Estrelas de fundo
-        for x, y, b in self.stars:
-            sx = (x - self.cam_x * 0.08) % WIDTH
-            sy = (y - self.cam_y * 0.08) % HEIGHT
-            pygame.draw.circle(self.screen, (b, b, b), (int(sx), int(sy)), 1)
+        self.draw_stars()
 
         for body in self.bodies:
             body.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
-
+        self.belt.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
+        for pu in self.powerups:
+            pu.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
         for b in self.bullets:
             b.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
-
         for alien in self.aliens:
             alien.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
+        if self.state in ("playing", "paused"):
+            self.draw_prediction()
+        for part in self.particles:
+            part.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
+        if self.state != "over":
+            self.player.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
 
-        self.player.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
-        self.draw_hud()
-        self.draw_physics_panel()
+        if self.state == "menu":
+            self.draw_menu()
+        else:
+            self.draw_offscreen_arrows()
+            self.draw_hud()
+            self.draw_minimap()
+            self.draw_physics_panel()
+            if self.state == "paused":
+                self.draw_pause()
+            elif self.state == "over":
+                self.draw_game_over()
         pygame.display.flip()
+
+    # ------------------------------------------------------------------ laço
+    def start(self):
+        self.reset()
+        self.state = "playing"
+
+    def handle_keydown(self, key):
+        """Retorna False para encerrar o jogo."""
+        if self.state == "menu":
+            if key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+                self.start()
+            elif key == pygame.K_ESCAPE:
+                return False
+            return True
+
+        if key == pygame.K_f:
+            self.show_physics_panel = not self.show_physics_panel
+        elif key == pygame.K_t:
+            self.show_prediction = not self.show_prediction
+        elif key == pygame.K_m:
+            self.sfx.muted = not self.sfx.muted
+
+        if self.state == "playing":
+            if key in (pygame.K_p, pygame.K_ESCAPE):
+                self.state, self.pause_sel = "paused", 0
+            elif key == pygame.K_r:
+                self.start()
+        elif self.state == "paused":
+            if key in (pygame.K_p, pygame.K_ESCAPE):
+                self.state = "playing"
+            elif key in (pygame.K_UP, pygame.K_w):
+                self.pause_sel = (self.pause_sel - 1) % len(PAUSE_OPTIONS)
+            elif key in (pygame.K_DOWN, pygame.K_s):
+                self.pause_sel = (self.pause_sel + 1) % len(PAUSE_OPTIONS)
+            elif key == pygame.K_r:
+                self.start()
+            elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                choice = PAUSE_OPTIONS[self.pause_sel]
+                if choice == "Continuar":
+                    self.state = "playing"
+                elif choice == "Reiniciar":
+                    self.start()
+                elif choice == "Voltar ao menu":
+                    self.reset()
+                    self.state = "menu"
+                else:
+                    return False
+        elif self.state == "over":
+            if key in (pygame.K_r, pygame.K_RETURN, pygame.K_KP_ENTER):
+                self.start()
+            elif key == pygame.K_ESCAPE:
+                self.reset()
+                self.state = "menu"
+        return True
 
     def run(self):
         running = True
         while running:
-            dt = self.clock.tick(FPS) / 1000.0
-            dt = min(dt, 0.033)  # limita dt para estabilidade do Verlet
+            dt = min(self.clock.tick(FPS) / 1000.0, 0.033)   # limita dt para estabilidade do Verlet
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
-                if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_p:
-                        self.paused = not self.paused
-                    if event.key == pygame.K_r:
-                        self.reset()
-                    if event.key == pygame.K_f:
-                        self.show_physics_panel = not self.show_physics_panel
-                    if event.key == pygame.K_ESCAPE:
+                elif event.type == pygame.KEYDOWN:
+                    if not self.handle_keydown(event.key):
                         running = False
 
-            if not self.paused and not self.game_over:
+            if self.state == "playing":
                 self.handle_input(dt)
                 self.update(dt)
+            elif self.state == "over":
+                for part in self.particles[:]:
+                    part.update(dt)
+                    if part.life <= 0:
+                        self.particles.remove(part)
 
             self.draw()
 
@@ -450,7 +876,5 @@ class Game:
         sys.exit()
 
 
-if __name__ == "__main__":
-    game = Game()
-    game.run()
-
+def main():
+    Game().run()
