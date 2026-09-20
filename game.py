@@ -28,6 +28,23 @@ PLANETS_DATA = [
     ("Netuno",  1320, 28, 13,  (60, 100, 255)),
 ]
 PAUSE_OPTIONS = ["Continuar", "Reiniciar", "Voltar ao menu", "Sair"]
+# (planeta, nome, raio orbital, raio do corpo, cor, massa, ω rad/s)
+MOONS_DATA = [
+    ("Terra",   "Lua",       46, 5, (200, 200, 205), 0.3, 1.05),
+    ("Júpiter", "Io",        60, 4, (230, 210, 110), 0.3, 1.70),
+    ("Júpiter", "Europa",    80, 4, (210, 200, 180), 0.3, 1.05),
+    ("Júpiter", "Ganimedes", 104, 6, (170, 160, 150), 0.4, 0.68),
+]
+RING_DATA = {"Saturno": (28, 46)}
+# (chave, nome, custo(nível), descrição)
+SHOP_ITEMS = [
+    ("thrust", "Motor",              lambda lv: 20 * (lv + 1), "+12% de empuxo"),
+    ("tank",   "Tanque",             lambda lv: 15 * (lv + 1), "+25 de combustível máximo"),
+    ("shield", "Gerador de escudo",  lambda lv: 25 * (lv + 1), "+25% de duração do escudo"),
+    ("gun",    "Canhão",             lambda lv: 20 * (lv + 1), "cadência de tiro +18%"),
+    ("repair", "Reparo",             lambda lv: 35,            "+1 vida (máx. 6)"),
+    ("refuel", "Reabastecer",        lambda lv: 8,             "tanque cheio"),
+]
 
 
 def load_highscore():
@@ -88,9 +105,13 @@ class Game:
             v = math.sqrt(G * 8000 / r) * 0.995
             vx = -v * math.sin(theta)
             vy = v * math.cos(theta)
-            body = Body(name, x, y, vx, vy, mass * PLANET_MASS_SCALE, rad, color)
+            body = Body(name, x, y, vx, vy, mass * PLANET_MASS_SCALE, rad, color, ring=RING_DATA.get(name))
             body.compute_accel(self.bodies)
             self.bodies.append(body)
+
+        for parent_name, name, orbit_r, rad, color, mass, omega in MOONS_DATA:
+            parent = next(b for b in self.bodies if b.name == parent_name)
+            self.bodies.append(Moon(name, parent, orbit_r, rad, color, mass, omega, random.uniform(0, 2 * math.pi)))
 
         # Sagitarius A* — relativamente quieto; M87* — quasar ativo com jatos relativísticos
         self.bodies.append(BlackHole("Sagitarius A*", 2800, -900, mass=45000, horizon_radius=32,
@@ -102,7 +123,7 @@ class Game:
             body.compute_accel(self.bodies)
 
         terra = next(b for b in self.bodies if b.name == "Terra")
-        self.player = Player(terra.x + 55, terra.y)
+        self.player = Player(terra.x + 90, terra.y)
         self.player.vx = terra.vx
         self.player.vy = terra.vy - 1.2
         self.player.compute_accel(self.bodies)
@@ -116,6 +137,10 @@ class Game:
         self.powerups = []
         self.wave = 1
         self.wave_timer = 180.0
+        self.wave_cleared = False
+        self.wave_bonus = 0
+        self.shop_sel = 0
+        self.shop_msg = ""
         self.shoot_cd = 0.0
         self.cam_x = 0.0
         self.cam_y = 0.0
@@ -174,23 +199,24 @@ class Game:
         if alien in self.aliens:
             self.aliens.remove(alien)
         self.player.score += int(points * alien.spec["score"])
+        self.player.ore += ORE_ALIEN * alien.spec["score"]
         spawn_explosion(self.particles, alien.x, alien.y, alien.spec["color"],
                         n=22 if alien.kind == "tank" else 14, vx=alien.vx * 0.3, vy=alien.vy * 0.3)
         self.sfx.play("explode")
         if drop and random.random() < POWERUP_DROP_CHANCE:
-            kinds = ["shield", "triple", "fuel"] * 2 + (["life"] if self.player.lives < 5 else [])
+            kinds = ["shield", "triple", "fuel"] * 2 + (["life"] if self.player.lives < MAX_LIVES else [])
             self.powerups.append(PowerUp(alien.x, alien.y, random.choice(kinds), alien.vx, alien.vy))
 
     def apply_powerup(self, kind):
         p = self.player
         if kind == "shield":
-            p.shield = SHIELD_TIME
+            p.shield = p.shield_time
         elif kind == "triple":
             p.triple = TRIPLE_TIME
         elif kind == "fuel":
-            p.fuel = min(FUEL_MAX, p.fuel + FUEL_MAX * 0.5)
+            p.fuel = min(p.fuel_max, p.fuel + p.fuel_max * 0.5)
         elif kind == "life":
-            p.lives = min(5, p.lives + 1)
+            p.lives = min(MAX_LIVES, p.lives + 1)
         self.sfx.play("pickup")
 
     # ------------------------------------------------------------------ entrada
@@ -210,7 +236,7 @@ class Game:
             angles = (-9, 0, 9) if p.triple > 0 else (0,)
             for da in angles:
                 self.bullets.append(Bullet(p.x, p.y, p.angle + da, vx0=p.vx, vy0=p.vy))
-            self.shoot_cd = 12.0
+            self.shoot_cd = p.fire_cooldown
             self.sfx.play("shoot")
         if self.shoot_cd > 0:
             self.shoot_cd -= dt * 60
@@ -271,6 +297,7 @@ class Game:
                 self.powerups.remove(pu)
 
         self._black_holes(dt)
+        self._drop_orphan_moons()
         self._aliens(dt)
         self._bullets(dt)
         self._planet_collisions()
@@ -279,11 +306,21 @@ class Game:
         self._refuel_and_warnings(dt)
 
         if not self.aliens:
+            if not self.wave_cleared:
+                self.wave_cleared = True
+                self.wave_bonus = int(ORE_WAVE_BONUS * self.wave)
+                p.ore += self.wave_bonus
+                self.shop_sel, self.shop_msg = 0, ""
+                p.thrust_ax = p.thrust_ay = 0.0
+                p.thrusting = False
+                self.state = "shop"
+                return
             self.wave_timer -= dt * 60
             if self.wave_timer <= 0:
                 self.wave += 1
                 self.spawn_wave()
                 self.wave_timer = 120.0
+                self.wave_cleared = False
 
         self._monitor_conservation()
 
@@ -296,6 +333,7 @@ class Game:
         p = self.player
         black_holes = [b for b in self.bodies if getattr(b, "is_black_hole", False)]
         for bh in black_holes:
+            bh.absorb(ACCRETION_RATE * dt)   # acreção passiva: o buraco negro cresce
             if bh.swallows(p.x, p.y, p.radius):
                 p.lives = 0
                 bh.swallowed += 1
@@ -312,6 +350,7 @@ class Game:
                 if bh.swallows(alien.x, alien.y, alien.radius):
                     self.kill_alien(alien, 50, drop=False)
                     bh.swallowed += 1
+                    bh.absorb(BH_GAIN_ALIEN)
                     continue
                 if bh.active_quasar:
                     intensity = bh.apply_jet_force(alien, dt)
@@ -330,8 +369,12 @@ class Game:
                 if bh.swallows(body.x, body.y, body.radius):
                     self.bodies.remove(body)
                     bh.swallowed += 1
+                    bh.absorb(BH_GAIN_PLANET)
                     spawn_explosion(self.particles, body.x, body.y, body.color, n=24, speed=100, size=4)
                     self.sfx.play("swallow")
+
+    def _drop_orphan_moons(self):
+        self.bodies = [b for b in self.bodies if not (b.is_moon and b.parent not in self.bodies)]
 
     def _aliens(self, dt):
         p = self.player
@@ -394,6 +437,7 @@ class Game:
                         dead[i] = True
                         self.belt.remove(dead)
                         p.score += 10
+                        p.ore += ORE_ASTEROID
                         self.bullets.remove(b)
                         continue
                 for alien in self.aliens[:]:
@@ -452,13 +496,17 @@ class Game:
     def _refuel_and_warnings(self, dt):
         p = self.player
         self.refueling = False
+        self.mining = False
         for body in self.bodies:
             if getattr(body, "is_black_hole", False) or body.is_sun:
                 continue
-            if math.hypot(body.x - p.x, body.y - p.y) - body.radius < FUEL_REFILL_MARGIN and p.fuel < FUEL_MAX:
-                p.fuel = min(FUEL_MAX, p.fuel + FUEL_REFILL * dt)
+            d = math.hypot(body.x - p.x, body.y - p.y)
+            if not self.refueling and d - body.radius < FUEL_REFILL_MARGIN and p.fuel < p.fuel_max:
+                p.fuel = min(p.fuel_max, p.fuel + FUEL_REFILL * dt)
                 self.refueling = True
-                break
+            if body.ring and body.ring[0] < d < body.ring[1]:
+                p.ore += ORE_RING_RATE * dt
+                self.mining = True
 
         self.warning = ""
         for body in self.bodies:
@@ -475,10 +523,50 @@ class Game:
         if p.fuel <= 0 and not self.warning:
             self.warning = "SEM COMBUSTÍVEL — vá até um planeta"
 
+    # ------------------------------------------------------------------ loja
+    def upgrade_cost(self, key):
+        item = next(i for i in SHOP_ITEMS if i[0] == key)
+        return item[2](self.player.upgrades.get(key, 0))
+
+    def can_buy(self, key):
+        p = self.player
+        if key in UPGRADE_MAX and p.upgrades[key] >= UPGRADE_MAX[key]:
+            return False, "nível máximo"
+        if key == "repair" and p.lives >= MAX_LIVES:
+            return False, "vidas no máximo"
+        if key == "refuel" and p.fuel >= p.fuel_max - 0.5:
+            return False, "tanque já está cheio"
+        if p.ore < self.upgrade_cost(key):
+            return False, "minério insuficiente"
+        return True, ""
+
+    def buy(self, key):
+        ok, why = self.can_buy(key)
+        if not ok:
+            self.shop_msg = why
+            return False
+        p = self.player
+        p.ore -= self.upgrade_cost(key)
+        if key in UPGRADE_MAX:
+            p.upgrades[key] += 1
+            if key == "tank":
+                p.fuel = min(p.fuel_max, p.fuel + 25.0)
+        elif key == "repair":
+            p.lives += 1
+        elif key == "refuel":
+            p.fuel = p.fuel_max
+        self.sfx.play("pickup")
+        self.shop_msg = "comprado!"
+        return True
+
+    def leave_shop(self):
+        self.state = "playing"
+        self.wave_timer = 90.0
+
     def _monitor_conservation(self):
         E, K, U = compute_system_energy(self.bodies, self.player)
         L = compute_angular_momentum(self.bodies, self.player)
-        n_solar = sum(1 for b in self.bodies if not getattr(b, "is_black_hole", False))
+        n_solar = sum(1 for b in self.bodies if not getattr(b, "is_black_hole", False) and not b.is_moon)
         if self.initial_energy is None or n_solar != self.n_solar_bodies:
             # Novo baseline (início ou planeta engolido — o sistema mudou de fato)
             self.n_solar_bodies = n_solar
@@ -689,14 +777,16 @@ class Game:
         speed = math.hypot(p.vx, p.vy)
         self.screen.blit(self.font.render(f"Vel: {speed:.0f}", True, WHITE), (170, 40))
         self.screen.blit(self.small_font.render(f"Recorde: {self.highscore}", True, YELLOW), (300, 12))
+        ore_col = (255, 200, 90) if self.mining else (200, 170, 110)
+        self.screen.blit(self.small_font.render(f"Minério: {int(p.ore)}" + (" (minerando)" if self.mining else ""), True, ore_col), (430, 12))
 
         fuel_col = GREEN if p.fuel > 30 else (ORANGE if p.fuel > 12 else RED)
-        self.draw_bar(300, 40, 140, 12, p.fuel / FUEL_MAX, fuel_col,
+        self.draw_bar(300, 40, 140, 12, p.fuel / p.fuel_max, fuel_col,
                       "COMB." + (" +" if self.refueling else ""))
         if p.shield > 0:
-            self.draw_bar(520, 12, 90, 8, p.shield / SHIELD_TIME, CYAN, "escudo")
+            self.draw_bar(520, 30, 90, 8, p.shield / p.shield_time, CYAN, "escudo")
         if p.triple > 0:
-            self.draw_bar(520, 30, 90, 8, p.triple / TRIPLE_TIME, YELLOW, "tiro x3")
+            self.draw_bar(520, 44, 90, 8, p.triple / TRIPLE_TIME, YELLOW, "tiro x3")
 
         help1 = self.small_font.render(
             "A/D girar | W empuxo | Espaço atirar | +/- zoom | T trajetória | M som | F painel | P pausa | R reiniciar",
@@ -750,6 +840,41 @@ class Game:
             top += 50
         self.draw_overlay_text([("↑/↓ escolher  •  Enter confirmar", self.small_font, GRAY)], top + 10)
 
+    def draw_shop(self):
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 10, 200))
+        self.screen.blit(overlay, (0, 0))
+        p = self.player
+        self.draw_overlay_text([
+            (f"ONDA {self.wave} CONCLUÍDA", self.big_font, GREEN),
+            (f"+{self.wave_bonus} de minério de bônus   •   Minério: {int(p.ore)}", self.font, (255, 200, 90)),
+        ], 70)
+        top = 190
+        x0 = WIDTH // 2 - 330
+        for i, (key, name, cost_fn, desc) in enumerate(SHOP_ITEMS):
+            selected = i == self.shop_sel
+            ok, why = self.can_buy(key)
+            if key in UPGRADE_MAX:
+                lvl = p.upgrades[key]
+                level_txt = "■" * lvl + "□" * (UPGRADE_MAX[key] - lvl)
+                cost_txt = "MÁX" if lvl >= UPGRADE_MAX[key] else f"{cost_fn(lvl)}"
+            else:
+                level_txt, cost_txt = "", f"{cost_fn(0)}"
+            col = (CYAN if ok else GRAY) if selected else (WHITE if ok else (90, 90, 110))
+            if selected:
+                pygame.draw.rect(self.screen, (25, 35, 70), (x0 - 12, top - 4, 680, 40), border_radius=4)
+            self.screen.blit(self.font.render(("> " if selected else "  ") + name, True, col), (x0, top))
+            self.screen.blit(self.font.render(level_txt, True, col), (x0 + 250, top))
+            self.screen.blit(self.font.render(desc, True, GRAY if not selected else WHITE), (x0 + 340, top))
+            self.screen.blit(self.font.render(cost_txt, True, (255, 200, 90) if ok else (110, 95, 70)), (x0 + 610, top))
+            top += 46
+        if self.shop_msg:
+            self.draw_overlay_text([(self.shop_msg, self.font, YELLOW)], top + 8)
+        self.draw_overlay_text([
+            ("↑/↓ escolher  •  Enter comprar  •  Espaço/N próxima onda", self.font, WHITE),
+            (f"Vidas {p.lives}   Combustível {int(p.fuel)}/{int(p.fuel_max)}", self.small_font, GRAY),
+        ], HEIGHT - 110)
+
     def draw_game_over(self):
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 190))
@@ -775,7 +900,7 @@ class Game:
             b.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
         for alien in self.aliens:
             alien.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
-        if self.state in ("playing", "paused"):
+        if self.state in ("playing", "paused", "shop"):
             self.draw_prediction()
         for part in self.particles:
             part.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
@@ -789,7 +914,9 @@ class Game:
             self.draw_hud()
             self.draw_minimap()
             self.draw_physics_panel()
-            if self.state == "paused":
+            if self.state == "shop":
+                self.draw_shop()
+            elif self.state == "paused":
                 self.draw_pause()
             elif self.state == "over":
                 self.draw_game_over()
@@ -819,6 +946,17 @@ class Game:
         if self.state == "playing":
             if key in (pygame.K_p, pygame.K_ESCAPE):
                 self.state, self.pause_sel = "paused", 0
+            elif key == pygame.K_r:
+                self.start()
+        elif self.state == "shop":
+            if key in (pygame.K_UP, pygame.K_w):
+                self.shop_sel = (self.shop_sel - 1) % len(SHOP_ITEMS)
+            elif key in (pygame.K_DOWN, pygame.K_s):
+                self.shop_sel = (self.shop_sel + 1) % len(SHOP_ITEMS)
+            elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self.buy(SHOP_ITEMS[self.shop_sel][0])
+            elif key in (pygame.K_SPACE, pygame.K_n, pygame.K_ESCAPE):
+                self.leave_shop()
             elif key == pygame.K_r:
                 self.start()
         elif self.state == "paused":

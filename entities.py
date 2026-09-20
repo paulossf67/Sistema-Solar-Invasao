@@ -146,6 +146,8 @@ class BlackHole:
       - Zona de dano / aceleração dentro dos cones dos jatos
       - Radiação intensa
     """
+    is_moon = False
+
     def __init__(self, name, x, y, mass, horizon_radius=28, active_quasar=False, jet_angle=0.0):
         self.name = name
         self.x = x
