@@ -23,7 +23,7 @@ python sistema_solar.py
 | R | Reiniciar |
 
 **Objetivo:** sobreviver às ondas de aliens sem ser engolido pelo Sol, pelos horizontes de eventos
-ou pelo jato do quasar. O recorde é salvo em `highscore.json`.
+ou pelo jato do quasar. O recorde é salvo na pasta de dados do usuário.
 
 ## Jogabilidade
 - **Trajetória prevista (T):** linha pontilhada de onde a nave vai se ela ficar à deriva (planetas também se movem na simulação). Um **X vermelho** marca uma colisão prevista.
@@ -64,6 +64,17 @@ ou pelo jato do quasar. O recorde é salvo em `highscore.json`.
 - Unidades: px e px/s; contadores (tiros, invencibilidade, ondas) escalam com `dt`, então o ritmo não depende do FPS.
 - **Painel de física (F):** energia e momento angular de Sol + planetas + nave. Empuxo e jatos realizam trabalho externo e alteram E; o baseline é refeito quando um planeta é engolido. Sem buracos negros, a energia se conserva a ~1e-4 %.
 
+## Executável e instalador (Windows)
+```bash
+pip install pyinstaller          # uma vez
+python build.py                  # gera dist/SistemaSolar/ e installer/SistemaSolar_Setup_1.0.0.exe
+python build.py --exe-only       # só o executável
+```
+- O instalador usa o [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`). Sem ele, o `build.py` gera só o executável.
+- Instala por padrão só para o usuário atual (sem administrador), com atalhos no menu Iniciar e opção de atalho na área de trabalho.
+- O recorde fica em `%APPDATA%\SistemaSolarInvasao\highscore.json`, então continua funcionando instalado em qualquer pasta.
+- `SistemaSolar.exe --selftest` joga sozinho por alguns segundos e sai com código 0 (validação do pacote).
+
 ## Estrutura
 | Arquivo | Conteúdo |
 |---------|----------|
@@ -74,6 +85,7 @@ ou pelo jato do quasar. O recorde é salvo em `highscore.json`.
 | `audio.py` | efeitos sonoros sintetizados (sem arquivos) |
 | `render.py`, `config.py` | caches de render, constantes |
 | `tests/` | testes automatizados |
+| `build.py`, `packaging/` | executável (PyInstaller), ícone e script do instalador (Inno Setup) |
 | `sistema_solar_euler_backup.py` | versão antiga com Euler, só referência |
 
 ## Testes

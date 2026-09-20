@@ -1023,5 +1023,30 @@ class Game:
         sys.exit()
 
 
+def selftest(frames=400):
+    """Joga sozinho por alguns segundos (usado para validar o executável empacotado). Retorna 0 se OK."""
+    try:
+        g = Game()
+        g.draw()
+        g.start()
+        for i in range(frames):
+            g.player.apply_thrust(1 / 60)
+            g.update(1 / 60)
+            g.draw()
+            if g.state == "shop":
+                g.buy("refuel")
+                g.leave_shop()
+        for state in ("paused", "over", "shop", "menu"):
+            g.state = state
+            g.draw()
+        return 0
+    except Exception:   # noqa: BLE001 — qualquer falha no empacotamento deve virar código de erro
+        return 1
+
+
 def main():
+    if "--selftest" in sys.argv:
+        code = selftest()
+        pygame.quit()
+        sys.exit(code)
     Game().run()

@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 highscore.json
+build/
+dist/
+installer/
+packaging/_tmp_icon.png
