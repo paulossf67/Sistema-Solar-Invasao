@@ -41,5 +41,21 @@ O quasar possui dois jatos bipolares inspirados em observações reais de AGN (e
 - Rotação diferencial Kepleriana
 - Gradiente de cor (quente no centro → frio na borda)
 
+## Buracos negros
+- **Sagitarius A\*** — quieto, sem jatos (disco de acreção simples).
+- **M87\* (Quasar)** — ativo, com jatos bipolares.
+- Ambos engolem nave, aliens, tiros e planetas que cruzam o horizonte de eventos.
+- A gravidade deles tem **alcance suave** (~500 px): dominam a vizinhança, mas não desestabilizam as órbitas planetárias.
+
+## Física e integração
+- Sol, planetas, nave e aliens usam **Velocity Verlet em duas fases** (todos avançam a posição; depois as acelerações são recalculadas). Sem buracos negros, a energia do sistema se conserva a ~1e-4 % em 2 min.
+- As massas planetárias são escaladas (`PLANET_MASS_SCALE`) para manter as órbitas estáveis.
+- Unidades: velocidades em px/s; contadores (tiros, invencibilidade, ondas) escalam com `dt`, então o ritmo do jogo não depende do FPS.
+- **Painel de física (F):** energia e momento angular de Sol + planetas + nave. Empuxo e jatos realizam trabalho externo e alteram E; o baseline é refeito quando um planeta é engolido.
+
+## Arquivos
+- `sistema_solar.py` — jogo atual (Verlet)
+- `sistema_solar_euler_backup.py` — versão antiga com Euler, só referência
+
 ## Objetivo
 Sobreviver aos aliens e não ser destruído pelo horizonte de eventos nem pelos jatos relativísticos do quasar.

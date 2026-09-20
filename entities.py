@@ -1,167 +1,14 @@
-#!/usr/bin/env python3
-"""
-Sistema Solar - Invasão Alienígena
-Física orbital realista com Integração de Velocity Verlet
-"""
-
-import pygame
+"""Entidades: corpos, buracos negros, nave, tiros, aliens, partículas e asteroides."""
 import math
 import random
-import sys
 from collections import deque
 
-# ==================== CONFIGURAÇÕES ====================
-WIDTH, HEIGHT = 1280, 720
-FPS = 60
-G = 1200.0          # Constante gravitacional (ajustada para escala do jogo)
-SOFTENING = 25.0    # Evita singularidade quando r → 0
-MAX_SPEED = 450.0   # Velocidade máxima da nave (px/s; órbita da Terra ≈ 165 px/s)
-THRUST = 1.2        # Empuxo (×60 = px/s²; gravidade na órbita da Terra ≈ 75 px/s²)
-ROT_SPEED = 4.5     # Velocidade de rotação (graus/frame)
-BULLET_SPEED = 12.0
-BULLET_LIFE = 90    # frames
-PLAYER_RADIUS = 12
-ALIEN_RADIUS = 14
-ALIEN_MAX_SPEED = 160.0  # px/s
+import numpy as np
+import pygame
 
-# Cores
-BLACK = (5, 5, 15)
-WHITE = (240, 240, 255)
-YELLOW = (255, 230, 80)
-ORANGE = (255, 160, 40)
-RED = (255, 60, 60)
-GREEN = (80, 255, 120)
-CYAN = (80, 220, 255)
-PURPLE = (180, 100, 255)
-GRAY = (120, 120, 140)
-DARK_PANEL = (10, 12, 28)
-BH_DISK = (255, 120, 40)
-BH_PHOTON = (255, 220, 150)
-
-PLANET_MASS_SCALE = 0.15  # massas planetárias reduzidas: órbitas estáveis (Sol domina)
-BH_GRAVITY_RANGE = 500.0   # alcance efetivo da gravidade dos buracos negros (escala do jogo)
-DT_REF = 1.0 / 60.0        # passo de referência: contadores em "frames" são escalados por dt*60
-
-
-# ==================== CACHES DE RENDER ====================
-_font_cache = {}
-_surf_cache = {}
-
-
-def get_font(size, bold=False):
-    key = (size, bold)
-    f = _font_cache.get(key)
-    if f is None:
-        f = _font_cache[key] = pygame.font.SysFont("consolas", size, bold=bold)
-    return f
-
-
-def _cached_surface(key, builder):
-    surf = _surf_cache.get(key)
-    if surf is None:
-        if len(_surf_cache) > 600:
-            _surf_cache.clear()
-        surf = _surf_cache[key] = builder()
-    return surf
-
-
-def blit_glow_circle(screen, color, alpha, radius, cx, cy):
-    """Círculo translúcido preenchido, com superfície reutilizada entre frames."""
-    r = max(1, int(radius))
-    a = max(0, min(255, (int(alpha) // 4) * 4))
-    def build():
-        s = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
-        pygame.draw.circle(s, (*color, a), (r, r), r)
-        return s
-    screen.blit(_cached_surface(("c", r, tuple(color), a), build), (cx - r, cy - r))
-
-
-def blit_glow_ellipse(screen, color, alpha, w, h, width, x, y):
-    """Elipse (anel) translúcida com superfície reutilizada entre frames."""
-    w, h = max(2, int(w)), max(2, int(h))
-    a = max(0, min(255, (int(alpha) // 8) * 8))
-    def build():
-        s = pygame.Surface((w, h), pygame.SRCALPHA)
-        pygame.draw.ellipse(s, (*color, a), s.get_rect(), width)
-        return s
-    screen.blit(_cached_surface(("e", w, h, tuple(color), a, width), build), (x, y))
-
-
-# ==================== FUNÇÃO DE ACELERAÇÃO GRAVITACIONAL ====================
-def compute_gravity_accel(x, y, bodies, mass_scale=1.0, exclude=None):
-    """Calcula aceleração gravitacional em (x,y) causada por todos os bodies."""
-    ax, ay = 0.0, 0.0
-    for body in bodies:
-        if body is exclude:
-            continue
-        dx = body.x - x
-        dy = body.y - y
-        dist_sq = dx*dx + dy*dy + SOFTENING*SOFTENING
-        dist = math.sqrt(dist_sq)
-        force = G * body.mass * mass_scale / dist_sq
-        rng = getattr(body, "gravity_range", None)
-        if rng:
-            # Alcance suave: buracos negros dominam perto, mas não desestabilizam o sistema solar
-            force /= 1.0 + (dist / rng) ** 4
-        ax += force * dx / dist
-        ay += force * dy / dist
-    return ax, ay
-
-
-def compute_system_energy(bodies, player=None):
-    """
-    Energia mecânica do sistema Sol + planetas + nave (buracos negros e aliens
-    ficam de fora, pois têm gravidade de alcance limitado / massa desprezível).
-    E = Σ ½ m v²  -  Σ_{i<j} G m_i m_j / r_ij
-    Empuxo e jatos realizam trabalho externo, então E varia por causa deles.
-    """
-    kinetic = 0.0
-    potential = 0.0
-    solar = [b for b in bodies if not getattr(b, "is_black_hole", False)]
-
-    n = len(solar)
-    for i, b in enumerate(solar):
-        if not b.is_sun:
-            kinetic += 0.5 * b.mass * (b.vx*b.vx + b.vy*b.vy)
-        for j in range(i + 1, n):
-            other = solar[j]
-            dx = other.x - b.x
-            dy = other.y - b.y
-            r = math.sqrt(dx*dx + dy*dy + SOFTENING*SOFTENING)
-            potential -= G * b.mass * other.mass / r
-
-    if player is not None:
-        kinetic += 0.5 * (player.vx*player.vx + player.vy*player.vy)
-        for b in solar:
-            dx = b.x - player.x
-            dy = b.y - player.y
-            r = math.sqrt(dx*dx + dy*dy + SOFTENING*SOFTENING)
-            potential -= G * 1.0 * b.mass / r
-
-    return kinetic + potential, kinetic, potential
-
-
-def compute_angular_momentum(bodies, player=None, origin=(0.0, 0.0)):
-    """
-    Momento angular total em torno da origem (Sol).
-    L = Σ m (x vy - y vx)
-    """
-    L = 0.0
-    ox, oy = origin
-
-    for b in bodies:
-        if b.is_sun or getattr(b, "is_black_hole", False):
-            continue
-        rx = b.x - ox
-        ry = b.y - oy
-        L += b.mass * (rx * b.vy - ry * b.vx)
-
-    if player is not None:
-        rx = player.x - ox
-        ry = player.y - oy
-        L += 1.0 * (rx * player.vy - ry * player.vx)
-
-    return L
+from config import *
+from physics import *
+from render import *
 
 
 # ==================== CORPOS CELESTES ====================
@@ -206,7 +53,10 @@ class Body:
         self.compute_accel(bodies)
         self.vx += 0.5 * (self._ax0 + self.ax) * dt
         self.vy += 0.5 * (self._ay0 + self.ay) * dt
-        self.trail.append((self.x, self.y))
+
+    def record_trail(self):
+        if not self.is_sun:
+            self.trail.append((self.x, self.y))
 
     def draw(self, screen, cam_x, cam_y, zoom):
         sx = (self.x - cam_x) * zoom + WIDTH // 2
@@ -385,6 +235,9 @@ class BlackHole:
 
     def drift(self, dt):
         pass   # buracos negros são fixos
+
+    def record_trail(self):
+        pass
 
     def kick(self, dt, bodies):
         self.animate(dt)
@@ -631,21 +484,32 @@ class Player:
         self.mass = 1.0
         self.lives = 3
         self.score = 0
-        self.invincible = 0
+        self.invincible = 0.0     # "frames" de invencibilidade pós-dano (escala com dt)
+        self.shield = 0.0         # segundos de escudo (power-up)
+        self.triple = 0.0         # segundos de tiro triplo (power-up)
+        self.fuel = FUEL_MAX
         self.thrusting = False
+        self.flame = False        # chama visível no draw (thrusting é zerado no fim do frame)
         self.thrust_ax = 0.0
         self.thrust_ay = 0.0
         self.trail = deque(maxlen=30)
+
+    @property
+    def protected(self):
+        return self.invincible > 0 or self.shield > 0
 
     def rotate(self, direction, dt):
         self.angle += direction * ROT_SPEED * dt * 60
 
     def apply_thrust(self, dt):
-        """Calcula aceleração de empuxo (não aplica ainda — entra no Verlet)."""
+        """Calcula aceleração de empuxo (entra no Verlet) e gasta combustível."""
+        if self.fuel <= 0:
+            return
         rad = math.radians(self.angle)
-        self.thrust_ax = math.cos(rad) * THRUST * 60   # *60 para compensar dt≈1/60
+        self.thrust_ax = math.cos(rad) * THRUST * 60   # *60: THRUST está em px/frame²
         self.thrust_ay = math.sin(rad) * THRUST * 60
         self.thrusting = True
+        self.fuel = max(0.0, self.fuel - FUEL_USE * dt)
 
     def compute_accel(self, bodies):
         """Aceleração total = gravidade + empuxo."""
@@ -664,33 +528,32 @@ class Player:
         self.vx += 0.5 * (self._ax0 + self.ax) * dt
         self.vy += 0.5 * (self._ay0 + self.ay) * dt
 
-        # Limita velocidade máxima (opcional, para jogabilidade)
         speed = math.sqrt(self.vx*self.vx + self.vy*self.vy)
         if speed > MAX_SPEED:
             self.vx = self.vx / speed * MAX_SPEED
             self.vy = self.vy / speed * MAX_SPEED
 
+    def end_frame(self, dt):
+        """Estado de fim de frame (independe do número de subpassos físicos)."""
         self.trail.append((self.x, self.y))
-        if self.invincible > 0:
-            self.invincible = max(0.0, self.invincible - dt * 60)
-
-        # Reseta empuxo (só vale enquanto a tecla está pressionada)
+        self.invincible = max(0.0, self.invincible - dt * 60)
+        self.shield = max(0.0, self.shield - dt)
+        self.triple = max(0.0, self.triple - dt)
         self.thrust_ax = 0.0
         self.thrust_ay = 0.0
+        self.flame = self.thrusting
         self.thrusting = False
 
     def draw(self, screen, cam_x, cam_y, zoom):
         sx = (self.x - cam_x) * zoom + WIDTH // 2
         sy = (self.y - cam_y) * zoom + HEIGHT // 2
 
-        # Trilha de foguete
-        if len(self.trail) > 2 and self.thrusting:
+        if len(self.trail) > 2 and self.flame:
             for i, (tx, ty) in enumerate(list(self.trail)[-10:]):
                 px = (tx - cam_x) * zoom + WIDTH // 2
                 py = (ty - cam_y) * zoom + HEIGHT // 2
                 pygame.draw.circle(screen, (255, 160 + i*8, 40), (int(px), int(py)), 3)
 
-        # Nave (triângulo)
         rad = math.radians(self.angle)
         size = self.radius * zoom * 1.8
         points = [
@@ -703,8 +566,13 @@ class Player:
         pygame.draw.polygon(screen, color, points)
         pygame.draw.polygon(screen, WHITE, points, 1)
 
-        # Chama do motor
-        if self.thrusting:
+        if self.shield > 0:
+            blink = self.shield > 2 or int(self.shield * 6) % 2 == 0
+            if blink:
+                blit_glow_circle(screen, CYAN, 60, size * 1.5, sx, sy)
+                pygame.draw.circle(screen, CYAN, (int(sx), int(sy)), int(size * 1.5), 1)
+
+        if self.flame:
             flame = [
                 (sx - math.cos(rad) * size * 0.3, sy - math.sin(rad) * size * 0.3),
                 (sx + math.cos(rad + 2.8) * size * 0.5, sy + math.sin(rad + 2.8) * size * 0.5),
@@ -715,32 +583,66 @@ class Player:
 
 # ==================== TIRO ====================
 class Bullet:
-    def __init__(self, x, y, angle, owner="player"):
+    """Tiro afetado pela gravidade (curva perto de planetas / buracos negros → estilingue)."""
+    def __init__(self, x, y, angle, owner="player", vx0=0.0, vy0=0.0, speed=BULLET_SPEED):
         self.x = x
         self.y = y
         rad = math.radians(angle)
-        self.vx = math.cos(rad) * BULLET_SPEED
-        self.vy = math.sin(rad) * BULLET_SPEED
+        self.vx = math.cos(rad) * speed + vx0
+        self.vy = math.sin(rad) * speed + vy0
         self.life = BULLET_LIFE
         self.owner = owner
         self.radius = 3
+        self.tracer = deque(maxlen=7)
 
-    def update(self, dt):
-        # Tiros usam Euler simples (rápidos e de vida curta)
-        self.x += self.vx * dt * 60
-        self.y += self.vy * dt * 60
+    def update(self, dt, bodies):
+        ax, ay = compute_gravity_accel(self.x, self.y, bodies)
+        self.vx += ax * dt
+        self.vy += ay * dt
+        self.tracer.append((self.x, self.y))
+        self.x += self.vx * dt
+        self.y += self.vy * dt
         self.life -= dt * 60
 
     def draw(self, screen, cam_x, cam_y, zoom):
+        color = CYAN if self.owner == "player" else RED
+        pts = [((tx - cam_x) * zoom + WIDTH // 2, (ty - cam_y) * zoom + HEIGHT // 2)
+               for tx, ty in self.tracer]
         sx = (self.x - cam_x) * zoom + WIDTH // 2
         sy = (self.y - cam_y) * zoom + HEIGHT // 2
-        color = CYAN if self.owner == "player" else RED
+        pts.append((sx, sy))
+        if len(pts) > 1:
+            dim = tuple(c // 2 for c in color)
+            pygame.draw.lines(screen, dim, False, pts, 1)
         pygame.draw.circle(screen, color, (int(sx), int(sy)), max(2, int(self.radius * zoom)))
 
 
-# ==================== ALIEN ====================
+# ==================== ALIENS ====================
+ALIEN_TYPES = {
+    "normal":  dict(hp=2, radius=14, max_speed=160.0, thrust=15.0, color=PURPLE,        cd=(50, 110), range=450, mass=0.5, score=1.0),
+    "fast":    dict(hp=1, radius=11, max_speed=260.0, thrust=26.0, color=ORANGE,        cd=(90, 160), range=350, mass=0.4, score=1.3),
+    "shooter": dict(hp=2, radius=14, max_speed=120.0, thrust=9.0,  color=GREEN,         cd=(28, 55),  range=700, mass=0.5, score=1.6),
+    "tank":    dict(hp=6, radius=22, max_speed=90.0,  thrust=8.0,  color=(200, 60, 90), cd=(60, 100), range=500, mass=1.5, score=3.0),
+}
+
+
+def alien_kinds_for_wave(wave):
+    """Tipos disponíveis por onda (progressão de dificuldade)."""
+    kinds = ["normal"]
+    if wave >= 2:
+        kinds.append("fast")
+    if wave >= 3:
+        kinds.append("shooter")
+    if wave >= 4:
+        kinds.append("tank")
+    return kinds
+
+
 class Alien:
-    def __init__(self, x, y, target=None):
+    def __init__(self, x, y, target=None, kind="normal"):
+        spec = ALIEN_TYPES[kind]
+        self.kind = kind
+        self.spec = spec
         self.x = x
         self.y = y
         angle = random.uniform(0, 360)
@@ -749,10 +651,10 @@ class Alien:
         self.vy = math.sin(math.radians(angle)) * speed
         self.ax = 0.0
         self.ay = 0.0
-        self.radius = ALIEN_RADIUS
-        self.mass = 0.5
-        self.hp = 2
-        self.shoot_cooldown = random.randint(40, 100)
+        self.radius = spec["radius"]
+        self.mass = spec["mass"]
+        self.hp = spec["hp"]
+        self.shoot_cooldown = float(random.randint(*spec["cd"]))
         self.angle = 0
         self.target = target
         self.ai_ax = 0.0
@@ -761,13 +663,15 @@ class Alien:
     def compute_accel(self, bodies, player):
         gx, gy = compute_gravity_accel(self.x, self.y, bodies, mass_scale=0.75)
 
-        # IA: pequeno empuxo em direção ao jogador
         if player:
             dx = player.x - self.x
             dy = player.y - self.y
             dist = math.sqrt(dx*dx + dy*dy) + 1.0
-            self.ai_ax = (dx / dist) * 0.25 * 60
-            self.ai_ay = (dy / dist) * 0.25 * 60
+            # Atiradores mantêm distância; os demais perseguem
+            sign = -1.0 if (self.kind == "shooter" and dist < 380) else 1.0
+            thrust = self.spec["thrust"]
+            self.ai_ax = sign * (dx / dist) * thrust
+            self.ai_ay = sign * (dy / dist) * thrust
             self.angle = math.degrees(math.atan2(dy, dx))
         else:
             self.ai_ax = self.ai_ay = 0.0
@@ -780,473 +684,173 @@ class Alien:
         self.x += self.vx * dt + 0.5 * self.ax * dt * dt
         self.y += self.vy * dt + 0.5 * self.ay * dt * dt
 
-    def kick(self, dt, bodies, player, bullets):
+    def kick(self, dt, bodies, player):
         self.compute_accel(bodies, player)
         self.vx += 0.5 * (self._ax0 + self.ax) * dt
         self.vy += 0.5 * (self._ay0 + self.ay) * dt
-
-        # Limita velocidade
+        max_speed = self.spec["max_speed"]
         speed = math.sqrt(self.vx*self.vx + self.vy*self.vy)
-        if speed > ALIEN_MAX_SPEED:
-            self.vx = self.vx / speed * ALIEN_MAX_SPEED
-            self.vy = self.vy / speed * ALIEN_MAX_SPEED
+        if speed > max_speed:
+            self.vx = self.vx / speed * max_speed
+            self.vy = self.vy / speed * max_speed
 
-        # Tiro
+    def think(self, dt, player, bullets):
+        """IA de tiro (uma vez por frame). Retorna True se atirou."""
         self.shoot_cooldown -= dt * 60
         if player:
             dx = player.x - self.x
             dy = player.y - self.y
-            dist = math.sqrt(dx*dx + dy*dy)
-            if self.shoot_cooldown <= 0 and dist < 450:
-                bullets.append(Bullet(self.x, self.y, self.angle, owner="alien"))
-                self.shoot_cooldown = random.randint(50, 110)
+            if self.shoot_cooldown <= 0 and dx*dx + dy*dy < self.spec["range"] ** 2:
+                bullets.append(Bullet(self.x, self.y, self.angle, owner="alien", speed=ALIEN_BULLET_SPEED))
+                self.shoot_cooldown = float(random.randint(*self.spec["cd"]))
+                return True
+        return False
 
     def draw(self, screen, cam_x, cam_y, zoom):
         sx = (self.x - cam_x) * zoom + WIDTH // 2
         sy = (self.y - cam_y) * zoom + HEIGHT // 2
         r = max(4, self.radius * zoom)
+        base = self.spec["color"]
+        light = tuple(min(255, c + 90) for c in base)
 
-        pygame.draw.circle(screen, PURPLE, (int(sx), int(sy)), int(r))
-        pygame.draw.circle(screen, (220, 150, 255), (int(sx), int(sy)), int(r * 0.6))
+        pygame.draw.circle(screen, base, (int(sx), int(sy)), int(r))
+        pygame.draw.circle(screen, light, (int(sx), int(sy)), int(r * 0.6))
         pygame.draw.circle(screen, RED, (int(sx - r*0.3), int(sy - r*0.2)), max(2, int(r*0.25)))
         pygame.draw.circle(screen, RED, (int(sx + r*0.3), int(sy - r*0.2)), max(2, int(r*0.25)))
+        if self.kind == "tank":
+            frac = self.hp / self.spec["hp"]
+            pygame.draw.rect(screen, (60, 20, 30), (sx - r, sy - r - 8, r * 2, 4))
+            pygame.draw.rect(screen, RED, (sx - r, sy - r - 8, r * 2 * frac, 4))
 
 
-# ==================== JOGO PRINCIPAL ====================
-class Game:
-    def __init__(self):
-        pygame.init()
-        pygame.display.set_caption("Sistema Solar — Invasão Alienígena | Verlet + Quasar Ativo")
-        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
-        self.clock = pygame.time.Clock()
-        self.font = get_font(18)
-        self.big_font = get_font(36, bold=True)
-        self.small_font = get_font(14)
-        rng = random.Random(42)   # estrelas fixas de fundo (geradas uma única vez)
-        self.stars = [(rng.randint(-3000, 3000), rng.randint(-3000, 3000), rng.randint(90, 255))
-                      for _ in range(130)]
-        self.reset()
-
-    def reset(self):
-        self.bodies = [
-            Body("Sol", 0, 0, 0, 0, 8000, 45, YELLOW, is_sun=True)
-        ]
-
-        planets_data = [
-            ("Mercúrio", 180,  8,  6,  (180, 160, 140)),
-            ("Vênus",    260, 18,  9,  (230, 190, 100)),
-            ("Terra",    360, 22, 10,  (70, 140, 255)),
-            ("Marte",    480, 12,  7,  (220, 100, 60)),
-            ("Júpiter",  720, 90, 22,  (220, 180, 120)),
-            ("Saturno",  920, 55, 18,  (230, 210, 150)),
-            ("Urano",   1120, 30, 14,  (120, 220, 230)),
-            ("Netuno",  1320, 28, 13,  (60, 100, 255)),
-        ]
-
-        for name, r, mass, rad, color in planets_data:
-            theta = random.uniform(0, 2 * math.pi)
-            x = r * math.cos(theta)
-            y = r * math.sin(theta)
-            v = math.sqrt(G * 8000 / r) * 0.995
-            vx = -v * math.sin(theta)
-            vy =  v * math.cos(theta)
-            body = Body(name, x, y, vx, vy, mass * PLANET_MASS_SCALE, rad, color)
-            body.compute_accel(self.bodies)  # aceleração inicial
-            self.bodies.append(body)
-
-        # === Buracos negros supermassivos / Quasar ===
-        # Sagitarius A* — relativamente quieto
-        bh1 = BlackHole("Sagitarius A*", 2800, -900, mass=45000, horizon_radius=32,
-                        active_quasar=False)
-        # M87* — quasar ativo com jatos relativísticos (inspirado no jato real de M87)
-        bh2 = BlackHole("M87* (Quasar)", -3400, 1800, mass=95000, horizon_radius=52,
-                        active_quasar=True, jet_angle=35.0)
-        self.bodies.append(bh1)
-        self.bodies.append(bh2)
-
-        # Recomputa acelerações com todos os corpos (incluindo BHs)
-        for body in self.bodies:
-            if hasattr(body, "compute_accel"):
-                body.compute_accel(self.bodies)
-
-        # Jogador perto da Terra
-        terra = next(b for b in self.bodies if b.name == "Terra")
-        self.player = Player(terra.x + 55, terra.y)
-        self.player.vx = terra.vx
-        self.player.vy = terra.vy - 1.2
-        self.player.compute_accel(self.bodies)
-
-        self.bullets = []
-        self.aliens = []
-        self.wave = 1
-        self.wave_timer = 180.0
-        self.shoot_cd = 0.0
-        self.game_over = False
-        self.paused = False
-        self.cam_x = 0.0
-        self.cam_y = 0.0
-        self.zoom = 0.55
-
-        # Histórico para gráficos de conservação
-        self.energy_history = deque(maxlen=300)   # ~5 segundos a 60 fps
-        self.L_history = deque(maxlen=300)
-        self.initial_energy = None
-        self.initial_L = None
-        self.n_solar_bodies = None   # muda quando um planeta é engolido → rebaseia E e L
-        self.show_physics_panel = True
-
-        self.spawn_wave()
-
-    def spawn_wave(self):
-        n = 3 + self.wave * 2
-        for _ in range(n):
-            angle = random.uniform(0, 2 * math.pi)
-            dist = random.uniform(1600, 2200)
-            x = dist * math.cos(angle)
-            y = dist * math.sin(angle)
-            alien = Alien(x, y, self.player)
-            alien.compute_accel(self.bodies, self.player)
-            self.aliens.append(alien)
-
-    def handle_input(self, dt):
-        keys = pygame.key.get_pressed()
-        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
-            self.player.rotate(-1, dt)
-        if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
-            self.player.rotate(1, dt)
-        if keys[pygame.K_UP] or keys[pygame.K_w]:
-            self.player.apply_thrust(dt)
-
-        if keys[pygame.K_SPACE]:
-            if self.shoot_cd <= 0:
-                self.bullets.append(Bullet(self.player.x, self.player.y, self.player.angle))
-                self.shoot_cd = 12.0
-        if self.shoot_cd > 0:
-            self.shoot_cd -= dt * 60
-
-        if keys[pygame.K_EQUALS] or keys[pygame.K_PLUS]:
-            self.zoom = min(1.8, self.zoom + 0.012 * dt * 60)
-        if keys[pygame.K_MINUS]:
-            self.zoom = max(0.12, self.zoom - 0.012 * dt * 60)
+# ==================== PARTÍCULAS DE EXPLOSÃO ====================
+class Particle:
+    def __init__(self, x, y, vx, vy, life, color, size):
+        self.x, self.y, self.vx, self.vy = x, y, vx, vy
+        self.life = self.max_life = life
+        self.color = color
+        self.size = size
 
     def update(self, dt):
-        if self.game_over or self.paused:
-            return
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+        drag = 0.985 ** (dt * 60)
+        self.vx *= drag
+        self.vy *= drag
+        self.life -= dt
 
-        # === Velocity Verlet em duas fases para todos os corpos ===
-        # 1) todos avançam a posição com a aceleração antiga;
-        # 2) as acelerações são recalculadas com o estado novo e as velocidades atualizadas.
-        movers = self.bodies + [self.player] + self.aliens
-        for m in movers:
-            m.drift(dt)
-        for body in self.bodies:
-            body.kick(dt, self.bodies)
-        self.player.kick(dt, self.bodies)
-
-        # Câmera suave (independente do FPS)
-        k = 1.0 - (1.0 - 0.09) ** (dt * 60)
-        self.cam_x += (self.player.x - self.cam_x) * k
-        self.cam_y += (self.player.y - self.cam_y) * k
-
-        # --- Horizonte de eventos + jatos de quasar ---
-        black_holes = [b for b in self.bodies if getattr(b, "is_black_hole", False)]
-        for bh in black_holes:
-            # Jogador engolido
-            if bh.swallows(self.player.x, self.player.y, self.player.radius):
-                self.player.lives = 0
-                self.game_over = True
-                bh.swallowed += 1
-
-            # Jato do quasar afeta o jogador
-            if bh.active_quasar and self.player.invincible <= 0:
-                intensity = bh.apply_jet_force(self.player, dt)
-                if intensity > 0.15:
-                    # Dano por radiação / partículas relativísticas
-                    self.player.lives -= 1
-                    self.player.invincible = 75
-                    if self.player.lives <= 0:
-                        self.game_over = True
-
-            # Aliens
-            for alien in self.aliens[:]:
-                if bh.swallows(alien.x, alien.y, alien.radius):
-                    self.aliens.remove(alien)
-                    bh.swallowed += 1
-                    self.player.score += 50
-                    continue
-                # Jato também empurra / danifica aliens
-                if bh.active_quasar:
-                    intensity = bh.apply_jet_force(alien, dt)
-                    if intensity > 0.25:
-                        alien.hp -= 1
-                        if alien.hp <= 0:
-                            self.aliens.remove(alien)
-                            self.player.score += 80  # bônus por destruir com o jato
-
-            # Tiros engolidos
-            for b in self.bullets[:]:
-                if bh.swallows(b.x, b.y, b.radius):
-                    self.bullets.remove(b)
-
-            # Planetas engolidos
-            for body in self.bodies[:]:
-                if getattr(body, "is_black_hole", False) or body.is_sun:
-                    continue
-                if bh.swallows(body.x, body.y, body.radius):
-                    self.bodies.remove(body)
-                    bh.swallowed += 1
-
-        # Aliens
-        for alien in self.aliens[:]:
-            alien.kick(dt, self.bodies, self.player, self.bullets)
-
-            # Colisão alien × jogador
-            if self.player.invincible <= 0:
-                dx = alien.x - self.player.x
-                dy = alien.y - self.player.y
-                if dx*dx + dy*dy < (alien.radius + self.player.radius)**2:
-                    self.player.lives -= 1
-                    self.player.invincible = 90
-                    alien.vx += dx * 0.08
-                    alien.vy += dy * 0.08
-                    if self.player.lives <= 0:
-                        self.game_over = True
-
-        # Tiros
-        for b in self.bullets[:]:
-            b.update(dt)
-            if b.life <= 0:
-                self.bullets.remove(b)
-                continue
-
-            if b.owner == "player":
-                for alien in self.aliens[:]:
-                    dx = alien.x - b.x
-                    dy = alien.y - b.y
-                    if dx*dx + dy*dy < (alien.radius + b.radius)**2:
-                        alien.hp -= 1
-                        if b in self.bullets:
-                            self.bullets.remove(b)
-                        if alien.hp <= 0:
-                            self.aliens.remove(alien)
-                            self.player.score += 100 * self.wave
-                        break
-            else:
-                if self.player.invincible <= 0:
-                    dx = self.player.x - b.x
-                    dy = self.player.y - b.y
-                    if dx*dx + dy*dy < (self.player.radius + b.radius)**2:
-                        self.player.lives -= 1
-                        self.player.invincible = 90
-                        if b in self.bullets:
-                            self.bullets.remove(b)
-                        if self.player.lives <= 0:
-                            self.game_over = True
-
-        # Colisão com planetas / Sol
-        for body in self.bodies:
-            dx = body.x - self.player.x
-            dy = body.y - self.player.y
-            min_dist = body.radius + self.player.radius
-            if dx*dx + dy*dy < min_dist*min_dist:
-                if body.is_sun:
-                    self.player.lives = 0
-                    self.game_over = True
-                else:
-                    if self.player.invincible <= 0:
-                        self.player.lives -= 1
-                        self.player.invincible = 60
-                        dist = math.sqrt(dx*dx + dy*dy) + 0.1
-                        self.player.vx -= (dx / dist) * 5
-                        self.player.vy -= (dy / dist) * 5
-                        if self.player.lives <= 0:
-                            self.game_over = True
-
-        # Próxima onda
-        if not self.aliens:
-            self.wave_timer -= dt * 60
-            if self.wave_timer <= 0:
-                self.wave += 1
-                self.spawn_wave()
-                self.wave_timer = 120.0
-
-        # === Monitoramento de conservação ===
-        E, K, U = compute_system_energy(self.bodies, self.player)
-        L = compute_angular_momentum(self.bodies, self.player)
-
-        n_solar = sum(1 for b in self.bodies if not getattr(b, "is_black_hole", False))
-        if self.initial_energy is None or n_solar != self.n_solar_bodies:
-            # Novo baseline (início ou planeta engolido — o sistema mudou de fato)
-            self.n_solar_bodies = n_solar
-            self.initial_energy = E
-            self.initial_L = L
-            self.energy_history.clear()
-            self.L_history.clear()
-
-        self.energy_history.append(E)
-        self.L_history.append(L)
-
-    def draw_physics_panel(self):
-        """Painel lateral com energia, momento angular e gráficos."""
-        if not self.show_physics_panel:
-            return
-
-        panel_w, panel_h = 280, 210
-        panel_x = WIDTH - panel_w - 12
-        panel_y = 90
-
-        # Fundo
-        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-        panel.fill((8, 10, 25, 210))
-        pygame.draw.rect(panel, (60, 80, 140), (0, 0, panel_w, panel_h), 1)
-        self.screen.blit(panel, (panel_x, panel_y))
-
-        # Valores atuais
-        E = self.energy_history[-1] if self.energy_history else 0.0
-        L = self.L_history[-1] if self.L_history else 0.0
-        E0 = self.initial_energy if self.initial_energy is not None else E
-        L0 = self.initial_L if self.initial_L is not None else L
-
-        dE = E - E0
-        dL = L - L0
-        rel_E = (dE / abs(E0) * 100) if abs(E0) > 1e-6 else 0.0
-        rel_L = (dL / abs(L0) * 100) if abs(L0) > 1e-6 else 0.0
-
-        title = self.small_font.render("Sol+planetas+nave (Verlet)", True, CYAN)
-        self.screen.blit(title, (panel_x + 10, panel_y + 8))
-
-        # Energia
-        e_col = GREEN if abs(rel_E) < 1.5 else (ORANGE if abs(rel_E) < 5 else RED)
-        self.screen.blit(self.small_font.render(f"Energia E : {E:,.0f}", True, WHITE),
-                         (panel_x + 10, panel_y + 30))
-        self.screen.blit(self.small_font.render(f"ΔE        : {dE:+.1f}  ({rel_E:+.2f}%)", True, e_col),
-                         (panel_x + 10, panel_y + 48))
-
-        # Momento angular
-        l_col = GREEN if abs(rel_L) < 1.5 else (ORANGE if abs(rel_L) < 5 else RED)
-        self.screen.blit(self.small_font.render(f"Momento L : {L:,.0f}", True, WHITE),
-                         (panel_x + 10, panel_y + 72))
-        self.screen.blit(self.small_font.render(f"ΔL        : {dL:+.1f}  ({rel_L:+.2f}%)", True, l_col),
-                         (panel_x + 10, panel_y + 90))
-
-        # Gráfico de energia (últimos ~5 s)
-        graph_x = panel_x + 10
-        graph_y = panel_y + 118
-        graph_w = panel_w - 20
-        graph_h = 80
-
-        pygame.draw.rect(self.screen, (15, 18, 35), (graph_x, graph_y, graph_w, graph_h))
-        pygame.draw.rect(self.screen, (50, 60, 100), (graph_x, graph_y, graph_w, graph_h), 1)
-
-        if len(self.energy_history) > 2:
-            vals = list(self.energy_history)
-            mn, mx = min(vals), max(vals)
-            span = max(mx - mn, abs(E0) * 0.01, 1.0)  # evita divisão por zero
-
-            points = []
-            for i, val in enumerate(vals):
-                px = graph_x + int(i / (len(vals) - 1) * (graph_w - 1))
-                py = graph_y + graph_h - 4 - int((val - mn) / span * (graph_h - 8))
-                points.append((px, py))
-
-            if len(points) > 1:
-                pygame.draw.lines(self.screen, CYAN, False, points, 1)
-
-            # Linha de referência (energia inicial)
-            ref_y = graph_y + graph_h - 4 - int((E0 - mn) / span * (graph_h - 8))
-            pygame.draw.line(self.screen, (80, 80, 100), (graph_x, ref_y), (graph_x + graph_w, ref_y), 1)
-
-        label = self.small_font.render("E(t) cinza=E₀ (empuxo/jato mudam E)", True, GRAY)
-        self.screen.blit(label, (graph_x, graph_y + graph_h + 4))
-
-    def draw_hud(self):
-        hud = pygame.Surface((WIDTH, 72), pygame.SRCALPHA)
-        hud.fill((0, 0, 20, 170))
-        self.screen.blit(hud, (0, 0))
-
-        self.screen.blit(self.font.render(f"Vidas: {self.player.lives}", True, GREEN), (20, 12))
-        self.screen.blit(self.font.render(f"Pontos: {self.player.score}", True, CYAN), (20, 40))
-        self.screen.blit(self.font.render(f"Onda: {self.wave}", True, ORANGE), (200, 12))
-
-        speed = math.sqrt(self.player.vx**2 + self.player.vy**2)
-        self.screen.blit(self.font.render(f"Vel: {speed:.1f}", True, WHITE), (200, 40))
-
-        help1 = self.small_font.render(
-            "A/D girar | W empuxo | Espaço atirar | +/- zoom | P pausar | F painel física | R reiniciar",
-            True, GRAY)
-        self.screen.blit(help1, (360, 16))
-
-        phys = self.small_font.render(
-            "Velocity Verlet  •  Newton  •  Quasar ativo (M87*) + jatos relativísticos",
-            True, (90, 210, 120))
-        self.screen.blit(phys, (360, 42))
-
-        if self.paused:
-            txt = self.big_font.render("PAUSADO", True, YELLOW)
-            self.screen.blit(txt, (WIDTH//2 - 90, HEIGHT//2 - 20))
-
-        if self.game_over:
-            overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-            overlay.fill((0, 0, 0, 190))
-            self.screen.blit(overlay, (0, 0))
-            self.screen.blit(self.big_font.render("GAME OVER", True, RED), (WIDTH//2 - 110, HEIGHT//2 - 60))
-            self.screen.blit(self.font.render(f"Pontuação final: {self.player.score}", True, WHITE),
-                             (WIDTH//2 - 110, HEIGHT//2))
-            self.screen.blit(self.font.render("Pressione R para reiniciar", True, CYAN),
-                             (WIDTH//2 - 130, HEIGHT//2 + 40))
-
-    def draw(self):
-        self.screen.fill(BLACK)
-
-        # Estrelas de fundo
-        for x, y, b in self.stars:
-            sx = (x - self.cam_x * 0.08) % WIDTH
-            sy = (y - self.cam_y * 0.08) % HEIGHT
-            pygame.draw.circle(self.screen, (b, b, b), (int(sx), int(sy)), 1)
-
-        for body in self.bodies:
-            body.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
-
-        for b in self.bullets:
-            b.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
-
-        for alien in self.aliens:
-            alien.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
-
-        self.player.draw(self.screen, self.cam_x, self.cam_y, self.zoom)
-        self.draw_hud()
-        self.draw_physics_panel()
-        pygame.display.flip()
-
-    def run(self):
-        running = True
-        while running:
-            dt = self.clock.tick(FPS) / 1000.0
-            dt = min(dt, 0.033)  # limita dt para estabilidade do Verlet
-
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-                if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_p:
-                        self.paused = not self.paused
-                    if event.key == pygame.K_r:
-                        self.reset()
-                    if event.key == pygame.K_f:
-                        self.show_physics_panel = not self.show_physics_panel
-                    if event.key == pygame.K_ESCAPE:
-                        running = False
-
-            if not self.paused and not self.game_over:
-                self.handle_input(dt)
-                self.update(dt)
-
-            self.draw()
-
-        pygame.quit()
-        sys.exit()
+    def draw(self, screen, cam_x, cam_y, zoom):
+        f = max(0.0, self.life / self.max_life)
+        col = tuple(int(c * (0.25 + 0.75 * f)) for c in self.color)
+        sx = (self.x - cam_x) * zoom + WIDTH // 2
+        sy = (self.y - cam_y) * zoom + HEIGHT // 2
+        pygame.draw.circle(screen, col, (int(sx), int(sy)), max(1, int(self.size * zoom * (0.4 + 0.6 * f))))
 
 
-if __name__ == "__main__":
-    game = Game()
-    game.run()
+def spawn_explosion(particles, x, y, color, n=18, speed=150.0, size=3.0, vx=0.0, vy=0.0):
+    for _ in range(n):
+        a = random.uniform(0, 2 * math.pi)
+        s = random.uniform(0.2, 1.0) * speed
+        c = random.choice([color, WHITE, tuple(min(255, k + 60) for k in color)])
+        particles.append(Particle(x, y, vx + math.cos(a) * s, vy + math.sin(a) * s,
+                                  random.uniform(0.4, 0.9), c, random.uniform(size * 0.6, size * 1.4)))
+
+
+# ==================== POWER-UPS ====================
+POWERUP_KINDS = {
+    "shield": (CYAN,   "E"),
+    "triple": (YELLOW, "3"),
+    "fuel":   (GREEN,  "F"),
+    "life":   (RED,    "+"),
+}
+
+
+class PowerUp:
+    def __init__(self, x, y, kind, vx=0.0, vy=0.0):
+        self.x, self.y = x, y
+        self.vx, self.vy = vx * 0.3, vy * 0.3
+        self.kind = kind
+        self.life = POWERUP_LIFE
+        self.radius = 11
+        self.t = random.uniform(0, 6.28)
+
+    def update(self, dt):
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+        self.life -= dt
+        self.t += dt * 4
+
+    def draw(self, screen, cam_x, cam_y, zoom):
+        if self.life < 4 and int(self.life * 5) % 2 == 0:
+            return   # pisca antes de sumir
+        color, letter = POWERUP_KINDS[self.kind]
+        sx = (self.x - cam_x) * zoom + WIDTH // 2
+        sy = (self.y - cam_y) * zoom + HEIGHT // 2
+        r = max(6, self.radius * zoom * (1.0 + 0.12 * math.sin(self.t)))
+        blit_glow_circle(screen, color, 70, r * 1.9, sx, sy)
+        pygame.draw.circle(screen, (10, 12, 28), (int(sx), int(sy)), int(r))
+        pygame.draw.circle(screen, color, (int(sx), int(sy)), int(r), 2)
+        txt = get_font(13, bold=True).render(letter, True, color)
+        screen.blit(txt, (sx - txt.get_width() / 2, sy - txt.get_height() / 2))
+
+
+# ==================== CINTURÃO DE ASTEROIDES (NumPy) ====================
+class AsteroidBelt:
+    """Partículas de teste (sem interação mútua) vetorizadas em NumPy, entre Marte e Júpiter."""
+    def __init__(self, sun_mass, n=BELT_COUNT):
+        rng = np.random.default_rng()
+        r = rng.uniform(BELT_R_MIN, BELT_R_MAX, n)
+        th = rng.uniform(0, 2 * np.pi, n)
+        v = np.sqrt(G * sun_mass / r) * rng.uniform(0.97, 1.03, n)
+        self.x = r * np.cos(th)
+        self.y = r * np.sin(th)
+        self.vx = -v * np.sin(th)
+        self.vy = v * np.cos(th)
+        self.size = rng.uniform(2.0, 5.5, n)
+        self.shade = rng.integers(110, 190, n)
+        self.ax = np.zeros(n)
+        self.ay = np.zeros(n)
+        self._ax0 = self.ax.copy()
+        self._ay0 = self.ay.copy()
+
+    def __len__(self):
+        return len(self.x)
+
+    def init_accel(self, src):
+        self.ax, self.ay = accel_points(self.x, self.y, src)
+
+    def drift(self, dt):
+        self._ax0, self._ay0 = self.ax, self.ay
+        self.x = self.x + self.vx * dt + 0.5 * self.ax * dt * dt
+        self.y = self.y + self.vy * dt + 0.5 * self.ay * dt * dt
+
+    def kick(self, dt, src):
+        self.ax, self.ay = accel_points(self.x, self.y, src)
+        self.vx = self.vx + 0.5 * (self._ax0 + self.ax) * dt
+        self.vy = self.vy + 0.5 * (self._ay0 + self.ay) * dt
+
+    def remove(self, dead_mask):
+        keep = ~dead_mask
+        for name in ("x", "y", "vx", "vy", "size", "shade", "ax", "ay", "_ax0", "_ay0"):
+            setattr(self, name, getattr(self, name)[keep])
+
+    def swallowed_mask(self, bodies):
+        """Asteroides dentro do Sol ou de um horizonte de eventos."""
+        mask = np.zeros(len(self.x), dtype=bool)
+        for b in bodies:
+            if b.is_sun or getattr(b, "is_black_hole", False):
+                rad = b.radius + self.size
+                mask |= (self.x - b.x) ** 2 + (self.y - b.y) ** 2 < rad ** 2
+        return mask
+
+    def hit_mask(self, x, y, radius):
+        return (self.x - x) ** 2 + (self.y - y) ** 2 < (self.size + radius) ** 2
+
+    def draw(self, screen, cam_x, cam_y, zoom):
+        sx = (self.x - cam_x) * zoom + WIDTH // 2
+        sy = (self.y - cam_y) * zoom + HEIGHT // 2
+        vis = np.nonzero((sx > -10) & (sx < WIDTH + 10) & (sy > -10) & (sy < HEIGHT + 10))[0]
+        for i in vis:
+            g = int(self.shade[i])
+            pygame.draw.circle(screen, (g, g - 15, g - 30), (int(sx[i]), int(sy[i])),
+                               max(1, int(self.size[i] * zoom)))
