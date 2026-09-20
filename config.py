@@ -53,3 +53,17 @@ SHIELD_TIME = 8.0
 TRIPLE_TIME = 10.0
 
 HIGHSCORE_FILE = "highscore.json"
+
+# Buracos negros que crescem
+ACCRETION_RATE = 45.0     # massa/s absorvida passivamente
+BH_MAX_GROWTH = 2.0       # limite: 2× a massa inicial (horizonte ≈ 1,41×)
+BH_GAIN_PLANET = 3000.0
+BH_GAIN_ALIEN = 150.0
+
+# Minério (moeda da loja) e melhorias
+ORE_ALIEN = 4.0           # × pontuação do tipo de alien
+ORE_ASTEROID = 2.0
+ORE_RING_RATE = 3.0       # por segundo dentro dos anéis de Saturno
+ORE_WAVE_BONUS = 10.0     # × onda
+UPGRADE_MAX = {"thrust": 5, "tank": 5, "shield": 4, "gun": 5}
+MAX_LIVES = 6

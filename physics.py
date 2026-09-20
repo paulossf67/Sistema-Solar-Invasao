@@ -35,7 +35,7 @@ def compute_system_energy(bodies, player=None):
     """
     kinetic = 0.0
     potential = 0.0
-    solar = [b for b in bodies if not getattr(b, "is_black_hole", False)]
+    solar = [b for b in bodies if not getattr(b, "is_black_hole", False) and not getattr(b, "is_moon", False)]
 
     n = len(solar)
     for i, b in enumerate(solar):
@@ -68,7 +68,7 @@ def compute_angular_momentum(bodies, player=None, origin=(0.0, 0.0)):
     ox, oy = origin
 
     for b in bodies:
-        if b.is_sun or getattr(b, "is_black_hole", False):
+        if b.is_sun or getattr(b, "is_black_hole", False) or getattr(b, "is_moon", False):
             continue
         rx = b.x - ox
         ry = b.y - oy
@@ -147,6 +147,7 @@ def predict_trajectory(player, bodies, seconds=PREDICT_SECONDS, step=PREDICT_STE
     Simula a nave "à deriva" (sem empuxo) com Velocity Verlet, movendo também os planetas.
     Retorna (caminho, corpo_atingido_ou_None).
     """
+    bodies = [b for b in bodies if not getattr(b, "is_moon", False)]   # luas ficam "em trilhos"
     n = len(bodies)
     fixed = np.array([b.is_sun or getattr(b, "is_black_hole", False) for b in bodies] + [False])
     movable = (~fixed).astype(float)

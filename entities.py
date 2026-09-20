@@ -13,7 +13,10 @@ from render import *
 
 # ==================== CORPOS CELESTES ====================
 class Body:
-    def __init__(self, name, x, y, vx, vy, mass, radius, color, is_sun=False):
+    is_moon = False
+
+    def __init__(self, name, x, y, vx, vy, mass, radius, color, is_sun=False, ring=None):
+        self.ring = ring          # (raio_interno, raio_externo) dos anéis, ou None
         self.name = name
         self.x = x
         self.y = y
@@ -74,6 +77,11 @@ class Body:
             if len(points) > 1:
                 pygame.draw.lines(screen, self.color, False, points, 1)
 
+        if self.ring:
+            for rr, col in ((self.ring[0], (150, 135, 100)), ((self.ring[0] + self.ring[1]) / 2, (190, 170, 125)),
+                            (self.ring[1], (130, 118, 90))):
+                pygame.draw.circle(screen, col, (int(sx), int(sy)), max(2, int(rr * zoom)), 1)
+
         # Corpo
         if self.is_sun:
             for i in range(4, 0, -1):
@@ -84,10 +92,48 @@ class Body:
                 blit_glow_circle(screen, glow_col, 28, glow_r, sx, sy)
         pygame.draw.circle(screen, self.color, (int(sx), int(sy)), int(r))
 
-        if zoom > 0.35 and not self.is_sun:
+        if zoom > 0.35 and not self.is_sun and not (self.is_moon and zoom < 0.9):
             font = get_font(12)
             text = font.render(self.name, True, (200, 200, 220))
             screen.blit(text, (sx + r + 4, sy - 6))
+
+
+# ==================== LUAS (em trilhos) ====================
+class Moon(Body):
+    """
+    Lua em órbita circular "em trilhos" ao redor de um planeta (estável mesmo com o softening da gravidade).
+    Age como corpo sólido e fonte gravitacional fraca, mas não é integrada pelo Verlet.
+    """
+    is_moon = True
+
+    def __init__(self, name, parent, orbit_r, radius, color, mass, omega, phase):
+        super().__init__(name, parent.x, parent.y, parent.vx, parent.vy, mass, radius, color)
+        self.parent = parent
+        self.orbit_r = orbit_r
+        self.omega = omega
+        self.phase = phase
+        self.trail = deque(maxlen=0)
+        self._sync()
+
+    def _sync(self):
+        c, s = math.cos(self.phase), math.sin(self.phase)
+        self.x = self.parent.x + self.orbit_r * c
+        self.y = self.parent.y + self.orbit_r * s
+        self.vx = self.parent.vx - self.orbit_r * self.omega * s
+        self.vy = self.parent.vy + self.orbit_r * self.omega * c
+
+    def compute_accel(self, bodies):
+        self.ax = self.ay = 0.0
+
+    def drift(self, dt):
+        pass
+
+    def kick(self, dt, bodies):
+        self.phase += self.omega * dt
+        self._sync()
+
+    def record_trail(self):
+        pass
 
 
 # ==================== BURACO NEGRO / QUASAR ====================
@@ -111,6 +157,8 @@ class BlackHole:
         self.mass = mass
         self.horizon = horizon_radius
         self.radius = horizon_radius
+        self.mass0 = mass
+        self.horizon0 = horizon_radius
         self.is_sun = False
         self.is_black_hole = True
         self.gravity_range = BH_GRAVITY_RANGE
@@ -232,6 +280,14 @@ class BlackHole:
 
     def compute_accel(self, bodies):
         self.ax = self.ay = 0.0
+
+    def absorb(self, amount):
+        """Ganha massa: horizonte e alcance gravitacional crescem com a raiz da massa (até BH_MAX_GROWTH×)."""
+        self.mass = min(self.mass0 * BH_MAX_GROWTH, self.mass + amount)
+        scale = math.sqrt(self.mass / self.mass0)
+        self.horizon = self.horizon0 * scale
+        self.radius = self.horizon
+        self.gravity_range = BH_GRAVITY_RANGE * scale
 
     def drift(self, dt):
         pass   # buracos negros são fixos
@@ -487,12 +543,26 @@ class Player:
         self.invincible = 0.0     # "frames" de invencibilidade pós-dano (escala com dt)
         self.shield = 0.0         # segundos de escudo (power-up)
         self.triple = 0.0         # segundos de tiro triplo (power-up)
+        self.upgrades = {k: 0 for k in UPGRADE_MAX}
+        self.ore = 0.0
         self.fuel = FUEL_MAX
         self.thrusting = False
         self.flame = False        # chama visível no draw (thrusting é zerado no fim do frame)
         self.thrust_ax = 0.0
         self.thrust_ay = 0.0
         self.trail = deque(maxlen=30)
+
+    @property
+    def fuel_max(self):
+        return FUEL_MAX + 25.0 * self.upgrades["tank"]
+
+    @property
+    def shield_time(self):
+        return SHIELD_TIME * (1.0 + 0.25 * self.upgrades["shield"])
+
+    @property
+    def fire_cooldown(self):
+        return 12.0 * 0.85 ** self.upgrades["gun"]
 
     @property
     def protected(self):
@@ -506,8 +576,9 @@ class Player:
         if self.fuel <= 0:
             return
         rad = math.radians(self.angle)
-        self.thrust_ax = math.cos(rad) * THRUST * 60   # *60: THRUST está em px/frame²
-        self.thrust_ay = math.sin(rad) * THRUST * 60
+        power = THRUST * (1.0 + 0.12 * self.upgrades["thrust"]) * 60   # *60: THRUST está em px/frame²
+        self.thrust_ax = math.cos(rad) * power
+        self.thrust_ay = math.sin(rad) * power
         self.thrusting = True
         self.fuel = max(0.0, self.fuel - FUEL_USE * dt)
 
