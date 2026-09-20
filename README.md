@@ -36,13 +36,22 @@ ou pelo jato do quasar. O recorde é salvo em `highscore.json`.
   - vermelho grande — tanque, 6 de vida (onda 4+)
 - **Power-ups** (soltos pelos aliens): **E** escudo (também abalroa aliens), **3** tiro triplo, **F** combustível, **+** vida.
 - **Colisões elásticas** com planetas e aliens (conservam momento); só batidas fortes causam dano.
-- **Cinturão de asteroides** entre Marte e Júpiter — perigo, mas também pontos ao destruir.
+- **Cinturão de asteroides** entre Marte e Júpiter — perigo, mas também minério e pontos ao destruir.
+- **Luas e anéis:** Lua (Terra); Io, Europa e Ganimedes (Júpiter); anéis de Saturno. As luas são sólidas e bloqueiam tiros; voar dentro dos anéis **minera minério**.
+- **Minério e loja:** aliens, asteroides e anéis dão minério. Ao limpar uma onda abre-se a **loja** (↑/↓, Enter compra, Espaço continua):
+  - **Motor:** +12% de empuxo por nível.
+  - **Tanque:** +25 de combustível máximo por nível.
+  - **Gerador de escudo:** +25% de duração por nível.
+  - **Canhão:** cadência de tiro +18% por nível.
+  - **Reparo:** +1 vida.
+  - **Reabastecer:** tanque cheio.
 - **Interface:** setas nas bordas apontam aliens e power-ups fora da tela, mini-mapa mostra o sistema e os jatos, alertas piscam perto do Sol, dos horizontes e do jato.
 
 ## Buracos negros
 - **Sagitarius A\*** — quieto, sem jatos.
 - **M87\* (Quasar)** — ativo, com jatos bipolares (núcleo e envelope, filamentos helicoidais, nós de choque, assimetria Doppler).
-- Ambos engolem nave, aliens, tiros, asteroides e planetas. Estrelas ao redor sofrem **lente gravitacional** aproximada.
+- **Eles crescem:** absorvem massa passivamente e ao engolir planetas e aliens. O horizonte e o alcance da gravidade crescem com a raiz da massa (limite de 2× a massa inicial). Quanto mais tempo passa, mais perigosos ficam.
+- Ambos engolem nave, aliens, tiros, asteroides e planetas (as luas somem junto com o planeta). Estrelas ao redor sofrem **lente gravitacional** aproximada.
 - A gravidade deles tem **alcance suave** (~500 px) para não desestabilizar as órbitas planetárias.
 - Disco de acreção: T ∝ r^(-3/4), rotação kepleriana diferencial, gradiente de cor.
 - No cone do jato: aceleração forte para longe e dano (aliens também morrem).
@@ -50,7 +59,8 @@ ou pelo jato do quasar. O recorde é salvo em `highscore.json`.
 ## Física
 - **Velocity Verlet em duas fases** (todos avançam a posição; depois as acelerações são recalculadas) com **subpassos adaptativos** quando algo rápido passa perto de um corpo (`Verlet ×N` no HUD).
 - Gravidade das partículas de teste (asteroides, previsão de trajetória) **vetorizada com NumPy**.
-- As massas planetárias são escaladas (`PLANET_MASS_SCALE`) para manter as órbitas estáveis.
+- As massas planetárias são escaladas (`PLANET_MASS_SCALE`) e a atração planeta↔planeta é reduzida (`PLANET_COUPLING`) para manter as órbitas estáveis; a nave e os tiros sentem a gravidade completa.
+- As **luas ficam "em trilhos"** (órbita circular analítica ao redor do planeta), porque o softening da gravidade impede órbitas lunares estáveis em N-corpos.
 - Unidades: px e px/s; contadores (tiros, invencibilidade, ondas) escalam com `dt`, então o ritmo não depende do FPS.
 - **Painel de física (F):** energia e momento angular de Sol + planetas + nave. Empuxo e jatos realizam trabalho externo e alteram E; o baseline é refeito quando um planeta é engolido. Sem buracos negros, a energia se conserva a ~1e-4 %.
 
@@ -70,4 +80,4 @@ ou pelo jato do quasar. O recorde é salvo em `highscore.json`.
 ```bash
 python -m unittest discover -s tests -v
 ```
-Cobrem conservação de energia, estabilidade orbital, alcance da gravidade dos buracos negros, horizonte e cone do jato, colisões (momento), previsão × simulação real, asteroides, combustível, escudo, gravidade nos tiros e um teste de fumaça de render.
+Cobrem luas, crescimento dos buracos negros, loja e melhorias, conservação de energia, estabilidade orbital, alcance da gravidade dos buracos negros, horizonte e cone do jato, colisões (momento), previsão × simulação real, asteroides, combustível, escudo, gravidade nos tiros e um teste de fumaça de render.

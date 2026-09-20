@@ -193,5 +193,86 @@ class TestGameRules(unittest.TestCase):
             g.draw()
 
 
+class TestMoonsAndGrowth(unittest.TestCase):
+    def test_moon_orbits_parent_on_rails(self):
+        random.seed(3)
+        g = solar_system_without_bh()
+        terra = next(b for b in g.bodies if b.name == "Terra")
+        moon = next(b for b in g.bodies if b.name == "Lua")
+        for _ in range(60 * 20):
+            g._integrate(1 / 60)
+            self.assertAlmostEqual(math.hypot(moon.x - terra.x, moon.y - terra.y), moon.orbit_r, places=6)
+        self.assertNotEqual(moon.phase, 0.0)
+
+    def test_moons_removed_with_parent(self):
+        g = solar_system_without_bh()
+        jup = next(b for b in g.bodies if b.name == "Júpiter")
+        g.bodies.remove(jup)
+        g._drop_orphan_moons()
+        self.assertFalse(any(b.name in ("Io", "Europa", "Ganimedes") for b in g.bodies))
+        self.assertTrue(any(b.name == "Lua" for b in g.bodies))
+
+    def test_bh_absorb_grows_and_caps(self):
+        bh = BlackHole("t", 0, 0, mass=10000, horizon_radius=30)
+        bh.absorb(3000)
+        self.assertGreater(bh.horizon, 30)
+        self.assertAlmostEqual(bh.horizon, 30 * math.sqrt(1.3), places=6)
+        self.assertAlmostEqual(bh.radius, bh.horizon)
+        self.assertGreater(bh.gravity_range, BH_GRAVITY_RANGE)
+        bh.absorb(1e9)
+        self.assertEqual(bh.mass, 10000 * BH_MAX_GROWTH)
+        self.assertAlmostEqual(bh.horizon, 30 * math.sqrt(BH_MAX_GROWTH), places=6)
+
+    def test_saturn_ring_gives_ore(self):
+        g = solar_system_without_bh()
+        sat = next(b for b in g.bodies if b.name == "Saturno")
+        g.player.x, g.player.y = sat.x + (sat.ring[0] + sat.ring[1]) / 2, sat.y
+        ore0 = g.player.ore
+        g._refuel_and_warnings(1.0)
+        self.assertGreater(g.player.ore, ore0)
+
+
+class TestShop(unittest.TestCase):
+    def test_wave_clear_opens_shop_and_buying(self):
+        random.seed(9)
+        g = game_mod.Game()
+        g.start()
+        g.aliens.clear()
+        g.player.ore = 500
+        g.update(1 / 60)
+        self.assertEqual(g.state, "shop")
+        self.assertGreater(g.player.ore, 500)          # bônus de onda
+        thrust0 = g.player.upgrades["thrust"]
+        ore0 = g.player.ore
+        self.assertTrue(g.buy("thrust"))
+        self.assertEqual(g.player.upgrades["thrust"], thrust0 + 1)
+        self.assertLess(g.player.ore, ore0)
+        g.player.fuel = g.player.fuel_max
+        self.assertFalse(g.buy("refuel"))              # tanque cheio
+        g.player.ore = 0
+        self.assertFalse(g.buy("tank"))                # sem minério
+        g.leave_shop()
+        self.assertEqual(g.state, "playing")
+
+    def test_upgrades_change_stats(self):
+        p = Player(0, 0)
+        base = (p.fuel_max, p.shield_time, p.fire_cooldown)
+        p.upgrades.update(tank=2, shield=2, gun=2)
+        self.assertEqual(p.fuel_max, base[0] + 50)
+        self.assertGreater(p.shield_time, base[1])
+        self.assertLess(p.fire_cooldown, base[2])
+        p.apply_thrust(0.01)
+        weak = math.hypot(p.thrust_ax, p.thrust_ay)
+        p.upgrades["thrust"] = 5
+        p.apply_thrust(0.01)
+        self.assertGreater(math.hypot(p.thrust_ax, p.thrust_ay), weak)
+
+    def test_max_level_blocks_purchase(self):
+        g = solar_system_without_bh()
+        g.player.ore = 9999
+        g.player.upgrades["gun"] = UPGRADE_MAX["gun"]
+        self.assertFalse(g.can_buy("gun")[0])
+
+
 if __name__ == "__main__":
     unittest.main()

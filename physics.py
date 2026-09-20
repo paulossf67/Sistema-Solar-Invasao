@@ -6,7 +6,7 @@ import numpy as np
 from config import *
 
 
-def compute_gravity_accel(x, y, bodies, mass_scale=1.0, exclude=None):
+def compute_gravity_accel(x, y, bodies, mass_scale=1.0, exclude=None, planet_coupling=1.0):
     """Calcula aceleração gravitacional em (x,y) causada por todos os bodies."""
     ax, ay = 0.0, 0.0
     for body in bodies:
@@ -17,6 +17,8 @@ def compute_gravity_accel(x, y, bodies, mass_scale=1.0, exclude=None):
         dist_sq = dx*dx + dy*dy + SOFTENING*SOFTENING
         dist = math.sqrt(dist_sq)
         force = G * body.mass * mass_scale / dist_sq
+        if planet_coupling != 1.0 and not body.is_sun and not getattr(body, "is_black_hole", False):
+            force *= planet_coupling
         rng = getattr(body, "gravity_range", None)
         if rng:
             # Alcance suave: buracos negros dominam perto, mas não desestabilizam o sistema solar
@@ -46,7 +48,8 @@ def compute_system_energy(bodies, player=None):
             dx = other.x - b.x
             dy = other.y - b.y
             r = math.sqrt(dx*dx + dy*dy + SOFTENING*SOFTENING)
-            potential -= G * b.mass * other.mass / r
+            coupling = 1.0 if (b.is_sun or other.is_sun) else PLANET_COUPLING
+            potential -= coupling * G * b.mass * other.mass / r
 
     if player is not None:
         kinetic += 0.5 * (player.vx*player.vx + player.vy*player.vy)
@@ -93,7 +96,7 @@ def source_arrays(bodies):
     return sx, sy, sm, sr
 
 
-def accel_points(px, py, src, self_index=None):
+def accel_points(px, py, src, self_index=None, scale=None):
     """
     Aceleração gravitacional em N pontos (partículas de teste) causada por M fontes.
     self_index[i] = índice da fonte que é o próprio ponto i (ou -1) para excluir auto-força.
@@ -105,6 +108,8 @@ def accel_points(px, py, src, self_index=None):
     d2 = dx * dx + dy * dy + SOFTENING * SOFTENING
     d = np.sqrt(d2)
     f = G * sm[None, :] / d2 / (1.0 + (d / sr[None, :]) ** 4)
+    if scale is not None:
+        f = f * scale
     if self_index is not None:
         rows = np.nonzero(self_index >= 0)[0]
         f[rows, self_index[rows]] = 0.0
@@ -159,9 +164,12 @@ def predict_trajectory(player, bodies, seconds=PREDICT_SECONDS, step=PREDICT_STE
     sr = np.array([getattr(b, "gravity_range", None) or 1e30 for b in bodies], dtype=float)
     rad = np.array([b.radius for b in bodies], dtype=float) + PLAYER_RADIUS
     self_index = np.append(np.arange(n), -1)
+    planet = np.array([not (b.is_sun or getattr(b, "is_black_hole", False)) for b in bodies])
+    scale = np.ones((n + 1, n))
+    scale[:n][np.ix_(planet, planet)] = PLANET_COUPLING   # mesmo acoplamento reduzido do jogo
 
     def accel():
-        ax, ay = accel_points(x, y, (x[:n], y[:n], sm, sr), self_index)
+        ax, ay = accel_points(x, y, (x[:n], y[:n], sm, sr), self_index, scale)
         return ax * movable, ay * movable
 
     ax, ay = accel()

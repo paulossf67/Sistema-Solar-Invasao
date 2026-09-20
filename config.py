@@ -26,6 +26,7 @@ DARK_PANEL = (10, 12, 28)
 BH_DISK = (255, 120, 40)
 BH_PHOTON = (255, 220, 150)
 
+PLANET_COUPLING = 0.2      # atração planeta↔planeta reduzida (Sol domina; nave/tiros sentem a gravidade completa)
 PLANET_MASS_SCALE = 0.15  # massas planetárias reduzidas: órbitas estáveis (Sol domina)
 BH_GRAVITY_RANGE = 500.0   # alcance efetivo da gravidade dos buracos negros (escala do jogo)
 DT_REF = 1.0 / 60.0        # passo de referência: contadores em "frames" são escalados por dt*60

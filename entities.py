@@ -36,7 +36,8 @@ class Body:
         if self.is_sun:
             self.ax = self.ay = 0.0
             return
-        self.ax, self.ay = compute_gravity_accel(self.x, self.y, bodies, exclude=self)
+        self.ax, self.ay = compute_gravity_accel(self.x, self.y, bodies, exclude=self,
+                                                 planet_coupling=PLANET_COUPLING)
 
     def drift(self, dt):
         """
