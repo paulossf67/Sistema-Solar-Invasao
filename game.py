@@ -47,18 +47,27 @@ SHOP_ITEMS = [
 ]
 
 
+def highscore_path():
+    """Recorde em pasta gravável do usuário (funciona instalado em Program Files e no .exe do PyInstaller)."""
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(base, "SistemaSolarInvasao", HIGHSCORE_FILE)
+
+
 def load_highscore():
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), HIGHSCORE_FILE)
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(highscore_path(), encoding="utf-8") as f:
             return int(json.load(f).get("highscore", 0))
     except (OSError, ValueError, AttributeError):
         return 0
 
 
 def save_highscore(value):
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), HIGHSCORE_FILE)
+    path = highscore_path()
     try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"highscore": int(value)}, f)
     except OSError:
